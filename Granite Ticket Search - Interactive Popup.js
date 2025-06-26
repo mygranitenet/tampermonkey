@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Granite Ticket Search - Interactive Popup
+// @name         Granite Ticket Search (Interactive Popup)
 // @namespace    http://tampermonkey.net/
-// @version      4.6
+// @version      4.7
 // @description  Search Smartsheet by highlighting text and open results directly from the popup, only after confirmation.
 // @author       ilakskills
 // @match        *://*/*
@@ -335,56 +335,74 @@
         const rect = range.getBoundingClientRect();
         return rect;
     }
-   function showConfirmSearchMenu(searchText, onConfirm) {
-    // Remove any existing menu
-    const existing = document.getElementById('gts-confirm-menu');
-    if (existing) existing.remove();
+    function showConfirmSearchMenu(searchText, onConfirm) {
+        // Remove any existing menu
+        const existing = document.getElementById('gts-confirm-menu');
+        if (existing) existing.remove();
 
-    const rect = getSelectionRect();
-    if (!rect) return;
+        const rect = getSelectionRect();
+        if (!rect) return;
 
-    const menu = document.createElement('div');
-    menu.id = 'gts-confirm-menu';
-    // ... (style code)
-    menu.innerHTML = `
-      <span>Search Smartsheet for: <b>${sanitize(searchText)}</b>?</span>
-      <button id="gts-confirm-search" style="margin-left:8px;">Search</button>
-      <button id="gts-confirm-cancel">Cancel</button>
-    `;
-    document.body.appendChild(menu);
+        const menu = document.createElement('div');
+        menu.id = 'gts-confirm-menu';
+        menu.style.position = 'fixed';
+        menu.style.left = `${rect.left + window.scrollX}px`;
+        menu.style.top = `${rect.bottom + window.scrollY + 8}px`;
+        menu.style.background = '#fff';
+        menu.style.border = '1px solid #ccc';
+        menu.style.borderRadius = '8px';
+        menu.style.padding = '10px 16px';
+        menu.style.boxShadow = '0 2px 16px #0003';
+        menu.style.zIndex = '999999';
+        menu.style.fontFamily = 'system-ui,sans-serif';
+        menu.style.display = 'flex';
+        menu.style.alignItems = 'center';
+        menu.style.gap = '10px';
 
-    let timeout = setTimeout(() => {
-        menu.remove();
-    }, 2000);
+        menu.innerHTML = `
+          <span>Search Smartsheet for: <b>${sanitize(searchText)}</b>?</span>
+          <button id="gts-confirm-search" style="margin-left:8px;">Search</button>
+          <button id="gts-confirm-cancel">Cancel</button>
+        `;
+        document.body.appendChild(menu);
 
-    const cleanup = () => {
-        clearTimeout(timeout);
-        menu.remove();
-    };
+        let clicked = false;
+        let timeout = setTimeout(() => {
+            if (!clicked) menu.remove();
+        }, 1000);
 
-    menu.querySelector('#gts-confirm-search').onclick = () => {
-        cleanup();
-        onConfirm();    // <--- This must call your search function
-    };
-    menu.querySelector('#gts-confirm-cancel').onclick = cleanup;
-}
+        const cleanup = () => {
+            clearTimeout(timeout);
+            menu.remove();
+        };
+
+        menu.querySelector('#gts-confirm-search').onclick = () => {
+            clicked = true;
+            cleanup();
+            onConfirm();
+        };
+        menu.querySelector('#gts-confirm-cancel').onclick = () => {
+            clicked = true;
+            cleanup();
+        };
+    }
 
     // Event: Highlight triggers confirm menu
-document.addEventListener('mouseup', async function () {
-    if (window.getSelection) {
-        const sel = window.getSelection().toString().trim();
-        if (sel.length > 2) {
-            showConfirmSearchMenu(sel, async () => {
-                if (!await getApiKey()) {
-                    await manageApiKey();
-                }
-                if (await getApiKey()) {
-                    searchSmartsheet(sel);
-                }
-            });
+    document.addEventListener('mouseup', async function () {
+        if (window.getSelection) {
+            const sel = window.getSelection().toString().trim();
+            if (sel.length > 2) {
+                showConfirmSearchMenu(sel, async () => {
+                    if (!await getApiKey()) {
+                        await manageApiKey();
+                    }
+                    if (await getApiKey()) {
+                        searchSmartsheet(sel);
+                    }
+                });
+            }
         }
-    }
-});
+    });
 
     // ESC closes popup
     document.addEventListener('keydown', e => {
