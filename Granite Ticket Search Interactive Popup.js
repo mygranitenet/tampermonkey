@@ -12,6 +12,77 @@
 // @grant        GM_setValue
 // ==/UserScript==
 
+// Add this at the very top (in your IIFE)
+GM_addStyle(`
+#gts-popup {
+  position: fixed !important;
+  z-index: 999999 !important;
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%) !important;
+  background: #fff !important;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.18) !important;
+  border-radius: 12px !important;
+  min-width: 400px !important;
+  max-width: 90vw !important;
+  font-family: system-ui,sans-serif !important;
+  border: 1px solid #dee2e6 !important;
+  display: block !important;
+}
+#gts-popup[hidden] { display: none !important; }
+#gts-popup-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; border-radius: 12px 12px 0 0; cursor: move;}
+#gts-popup-title { font-size: 16px; font-weight: 600;}
+#gts-popup-header-buttons { display: flex; gap: 8px;}
+#gts-popup-content { padding: 18px 20px; max-height: 60vh; overflow-y: auto; }
+.gts-details-table { width: 100%; margin-top: 10px; border-collapse: collapse;}
+.gts-details-table th, .gts-details-table td { padding: 5px 8px; border-bottom: 1px solid #eee;}
+.gts-section { margin-top: 25px; border-top: 1px solid #eee; padding-top: 20px;}
+.gts-comment { margin-bottom: 10px; }
+.gts-comment-header { font-size: 13px; color: #555; margin-bottom: 2px;}
+.gts-spinner { border: 4px solid #f3f3f3; border-top: 4px solid #0d6efd; border-radius: 50%; width: 32px; height: 32px; animation: spin 1s linear infinite; margin: 20px auto; display: block;}
+@keyframes spin { 0%{transform:rotate(0deg);} 100%{transform:rotate(360deg);} }
+.gts-error { color: #842029; background: #f8d7da; border: 1px solid #f5c2c7; border-radius: 8px; padding: 10px;}
+.gts-list { list-style: none; padding: 0; margin: 0; }
+.gts-list li { padding: 8px 0; }
+#gts-popup-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #888;}
+#gts-popup-close:focus { outline: 2px solid #0d6efd;}
+#gts-confirm-menu { animation: fadeIn 0.1s; }
+@keyframes fadeIn { from {opacity:0;} to {opacity:1;} }
+`);
+
+function createPopup() {
+    let popup = document.getElementById('gts-popup');
+    if (popup) {
+        popup.hidden = false;
+        // Reset to center on each open
+        popup.style.top = "50%";
+        popup.style.left = "50%";
+        popup.style.transform = "translate(-50%, -50%)";
+        return;
+    }
+    popup = document.createElement('div');
+    popup.id = 'gts-popup';
+    popup.setAttribute("role", "dialog");
+    popup.setAttribute("aria-modal", "true");
+    popup.style.top = "50%";
+    popup.style.left = "50%";
+    popup.style.transform = "translate(-50%, -50%)";
+    popup.innerHTML = `
+        <div id="gts-popup-header">
+            <span id="gts-popup-title" aria-live="polite"></span>
+            <div id="gts-popup-header-buttons">
+                <button id="gts-popup-apikey" title="Manage API Key">🔑</button>
+                <button id="gts-popup-close" aria-label="Close popup">&times;</button>
+            </div>
+        </div>
+        <div id="gts-popup-content"></div>
+    `;
+    document.body.appendChild(popup);
+    document.getElementById('gts-popup-close').onclick = closePopup;
+    document.getElementById('gts-popup-apikey').onclick = manageApiKey;
+    makeDraggable(popup, document.getElementById('gts-popup-header'));
+}
+
 (function () {
     'use strict';
 
