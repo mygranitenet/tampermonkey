@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Granite Ticket Search (Interactive Popup)
 // @namespace    http://tampermonkey.net/
-// @version      4.1
-// @description  Search Smartsheet by dragging to highlight text and open results directly from the popup.
+// @version      4.2
+// @description  Search Smartsheet by highlighting text and open results directly from the popup.
 // @author       ilakskills
 // @match        *://*/*
 // @connect      api.smartsheet.com
@@ -19,14 +19,13 @@
     const SMARTSHEET_API_BASE_URL = 'https://api.smartsheet.com/2.0';
     let SMARTSHEET_API_KEY = '';
 
-    // --- CSS for popup and spinner ---
+    // --- CSS ---
     GM_addStyle(`
         :root {
             --gts-primary: #0d6efd; --gts-text-on-primary: #004085; --gts-bg-on-primary: #cce5ff; --gts-border-on-primary: #b8daff;
             --gts-bg: #fff; --gts-header-bg: #f8f9fa; --gts-border: #dee2e6; --gts-text: #212529; --gts-link: #0d6efd;
             --gts-shadow: 0 4px 24px rgba(0,0,0,0.10);
         }
-        /* Popup styles */
         #gts-popup { position: fixed; z-index: 10001; top: 70px; left: 50%; transform: translateX(-50%); background: var(--gts-bg); box-shadow: var(--gts-shadow); border-radius: 12px; min-width: 400px; max-width: 90vw; font-family: system-ui,sans-serif; border: 1px solid var(--gts-border);}
         #gts-popup-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: var(--gts-header-bg); border-bottom: 1px solid var(--gts-border); border-radius: 12px 12px 0 0; cursor: move;}
         #gts-popup-title { font-size: 16px; font-weight: 600;}
@@ -49,6 +48,7 @@
 
     function sanitize(str) {
         const div = document.createElement('div');
+        div.textContent = str;
         return div.innerHTML;
     }
 
@@ -134,7 +134,6 @@
         const input = prompt('Enter your Smartsheet API Key (leave blank to clear):', current);
         if (input === null) return;
         if (input.trim()) {
-            // Simple format check, adjust as needed
             if (!/^([a-zA-Z0-9-_]{20,})$/.test(input.trim())) {
                 alert('Invalid API key format.');
                 return;
@@ -256,6 +255,48 @@
         });
     }
 
+function buildResultLabel(item) {
+    // Prefer explicit title or name
+    if (item.title) return item.title;
+    if (item.name) return item.name;
+    // Use row/discussion with context if available
+    if (item.objectType && item.objectId) {
+        let label = `${item.objectType} (${item.objectId})`;
+        if (item.parentName) {
+            label += ` in ${item.parentName}`;
+        } else if (item.sheetName) {
+            label += ` in ${item.sheetName}`;
+        }
+        return label;
+    }
+    if (item.sheetId) return `Sheet ${item.sheetId}`;
+    if (item.parentId) return `Item in ${item.parentId}`;
+    // Fallback to truncated JSON
+    return JSON.stringify(item).slice(0, 50);
+}
+
+    function renderSearchResultsView(results) {
+        if (!results.length) {
+            renderView('No Results', '<div class="gts-message">No results found.</div>');
+            return;
+        }
+        let html = '<ul class="gts-list">';
+        results.forEach((item, i) => {
+            let label = buildResultLabel(item);
+            html += `<li><strong>${sanitize(label)}</strong> <button data-index="${i}" class="gts-details-btn">Details</button></li>`;
+        });
+        html += '</ul>';
+        renderView('Search Results', html, true);
+
+        // Attach click handlers for details
+        document.querySelectorAll('.gts-details-btn').forEach(btn => {
+            btn.onclick = function () {
+                const idx = parseInt(this.getAttribute('data-index'), 10);
+                getObjectDetails(results[idx]);
+            };
+        });
+    }
+
     function searchSmartsheet(q) {
         showSpinner();
         const url = `${SMARTSHEET_API_BASE_URL}/search?query=${encodeURIComponent(q)}`;
@@ -268,27 +309,6 @@
             onError: (title, message) => {
                 renderView(title, `<div class="gts-error">${sanitize(message)}</div>`);
             }
-        });
-    }
-
-    function renderSearchResultsView(results) {
-        if (!results.length) {
-            renderView('No Results', '<div class="gts-message">No results found.</div>');
-            return;
-        }
-        let html = '<ul class="gts-list">';
-        results.forEach((item, i) => {
-            html += `<li><strong>${sanitize(item.name || item.title || 'Untitled')}</strong> <button data-index="${i}" class="gts-details-btn">Details</button></li>`;
-        });
-        html += '</ul>';
-        renderView('Search Results', html, true);
-
-        // Attach click handlers for details
-        document.querySelectorAll('.gts-details-btn').forEach(btn => {
-            btn.onclick = function () {
-                const idx = parseInt(this.getAttribute('data-index'), 10);
-                getObjectDetails(results[idx]);
-            };
         });
     }
 
