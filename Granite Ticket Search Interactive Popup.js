@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Granite Ticket Search Interactive Popup
+// @name         Granite Ticket Search Interactive Popup (with Logging)
 // @namespace    http://tampermonkey.net/
-// @version      4.9
-// @description  Search Smartsheet by highlighting text and open results directly from the popup, only after confirmation.
+// @version      4.10
+// @description  Search Smartsheet by highlighting text and open results directly from the popup, only after confirmation. Now with logging!
 // @author       ilakskills
 // @match        *://*/*
 // @connect      api.smartsheet.com
@@ -53,6 +53,7 @@
         return String(text).replace(urlRegex, url => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
     }
     function showSpinner() {
+        console.log('GTS: Showing spinner');
         renderView('Loading...', '<div class="gts-spinner" aria-label="Loading"></div>', true);
     }
 
@@ -75,6 +76,7 @@
         document.getElementById('gts-popup-close').onclick = closePopup;
         document.getElementById('gts-popup-apikey').onclick = manageApiKey;
         makeDraggable(popup, document.getElementById('gts-popup-header'));
+        console.log('GTS: Popup created');
     }
     function renderView(title, html, show = true) {
         createPopup();
@@ -82,10 +84,12 @@
         document.getElementById('gts-popup-content').innerHTML = html;
         if (show)
             document.getElementById('gts-popup').style.display = '';
+        console.log('GTS: renderView', title);
     }
     function closePopup() {
         const popup = document.getElementById('gts-popup');
         if (popup) popup.style.display = 'none';
+        console.log('GTS: Popup closed');
     }
     function makeDraggable(element, handle) {
         let isDragging = false, offsetX, offsetY;
@@ -114,6 +118,7 @@
         if (!SMARTSHEET_API_KEY) {
             SMARTSHEET_API_KEY = await GM_getValue('SMARTSHEET_API_KEY', '');
         }
+        console.log('GTS: getApiKey', SMARTSHEET_API_KEY ? 'Found' : 'Not found');
         return SMARTSHEET_API_KEY;
     }
     async function manageApiKey() {
@@ -128,10 +133,12 @@
             await GM_setValue('SMARTSHEET_API_KEY', input.trim());
             SMARTSHEET_API_KEY = input.trim();
             alert('API key saved!');
+            console.log('GTS: API key saved');
         } else {
             await GM_setValue('SMARTSHEET_API_KEY', '');
             SMARTSHEET_API_KEY = '';
             alert('API key cleared.');
+            console.log('GTS: API key cleared');
         }
     }
 
@@ -146,11 +153,13 @@
         return null;
     }
     function apiRequest({ url, method = 'GET', onSuccess, onError }) {
+        console.log('GTS: API request', url);
         GM_xmlhttpRequest({
             method,
             url,
             headers: { 'Authorization': `Bearer ${SMARTSHEET_API_KEY}` },
             onload: function (response) {
+                console.log('GTS: API response', response.status, url, response.responseText);
                 if (response.status >= 200 && response.status < 300) {
                     try {
                         if (!response.responseText.trim()) throw new Error("Response body is empty.");
@@ -158,6 +167,7 @@
                         onSuccess(data);
                     } catch (e) {
                         onError('Parsing Error', e.message, response.responseText);
+                        console.error('GTS: Parsing Error', e, response.responseText);
                     }
                 } else {
                     let details = '';
@@ -168,16 +178,19 @@
                         details = response.responseText;
                     }
                     onError('API Error', `${response.status} - ${response.statusText}<br>${sanitize(details)}`);
+                    console.error('GTS: API Error', response.status, details);
                 }
             },
             onerror: function () {
                 onError('Network Error', 'A network error occurred while fetching details.');
+                console.error('GTS: Network Error');
             }
         });
     }
 
     // Details View (Row)
     function renderRowDetailsView(rowData) {
+        console.log('GTS: Render Row Details', rowData);
         const columnMap = rowData.columns.reduce((map, col) => ({ ...map, [col.id]: col.title }), {});
         let content = '<h4>Row Details</h4><table class="gts-details-table">';
         content += rowData.cells.filter(cell => columnMap[cell.columnId])
@@ -207,6 +220,7 @@
 
     // Details View (Discussion)
     function renderDiscussionDetailsView(discussionData) {
+        console.log('GTS: Render Discussion Details', discussionData);
         let content = `<h4 style="margin-top:0;">Discussion: ${sanitize(discussionData.title)}</h4>` +
             (discussionData.comments && discussionData.comments.length > 0 ?
                 discussionData.comments.map(comment =>
@@ -240,6 +254,7 @@
 
     // Results Table
     function renderSearchResultsView(results) {
+        console.log('GTS: renderSearchResultsView', results);
         if (!results.length) {
             renderView('No Results', '<div class="gts-message">No results found.</div>');
             return;
@@ -272,6 +287,7 @@
         document.querySelectorAll('.gts-details-btn').forEach(btn => {
             btn.onclick = function () {
                 const idx = parseInt(this.getAttribute('data-index'), 10);
+                console.log('GTS: Details button clicked, index', idx);
                 getObjectDetails(results[idx]);
             };
         });
@@ -281,8 +297,8 @@
     function getObjectDetails(r) {
         const objectType = r.objectType || r.type;
         const objectId = r.objectId || r.id;
-        // For rows/discussions: parentObjectId is the sheetId
         const parentObjectId = r.parentObjectId || r.sheetId || r.parentId;
+        console.log('GTS: getObjectDetails', {objectType, objectId, parentObjectId, r});
         if (!objectType || !objectId || !parentObjectId) {
             renderView('Error', `<div class="gts-error">Missing required fields.<br><pre>${sanitize(JSON.stringify(r, null, 2))}</pre></div>`);
             return;
@@ -312,6 +328,7 @@
 
     // Search
     function searchSmartsheet(q) {
+        console.log('GTS: searchSmartsheet', q);
         showSpinner();
         const url = `${SMARTSHEET_API_BASE_URL}/search?query=${encodeURIComponent(q)}`;
         apiRequest({
@@ -326,7 +343,7 @@
         });
     }
 
-    // Highlight: Confirm Menu logic -- FULLY ROBUST, WORKS EVERY TIME
+    // Confirm Menu with DETAILED LOGGING
     function getSelectionRect() {
         const selection = window.getSelection();
         if (!selection.rangeCount) return null;
@@ -336,12 +353,17 @@
         return rect;
     }
     function showConfirmSearchMenu(searchText, onConfirm) {
-        // Always remove any existing menu first
         const existing = document.getElementById('gts-confirm-menu');
-        if (existing) existing.remove();
+        if (existing) {
+            existing.remove();
+            console.log('GTS: Existing confirm menu removed');
+        }
 
         const rect = getSelectionRect();
-        if (!rect) return;
+        if (!rect) {
+            console.log('GTS: No selection rect found');
+            return;
+        }
 
         const menu = document.createElement('div');
         menu.id = 'gts-confirm-menu';
@@ -365,26 +387,33 @@
           <button id="gts-confirm-cancel">Cancel</button>
         `;
         document.body.appendChild(menu);
+        console.log('GTS: Confirm menu shown for', searchText);
 
-        // This state is local to THIS menu only
         let closed = false;
         function cleanup() {
             if (closed) return;
             closed = true;
             if (menu.parentNode) menu.parentNode.removeChild(menu);
+            console.log('GTS: Confirm menu removed');
         }
 
         menu.querySelector('#gts-confirm-search').onclick = (evt) => {
             evt.stopPropagation();
+            console.log('GTS: Search button clicked');
             cleanup();
             onConfirm();
         };
         menu.querySelector('#gts-confirm-cancel').onclick = (evt) => {
             evt.stopPropagation();
+            console.log('GTS: Cancel button clicked');
             cleanup();
         };
-        // Remove after 2 seconds if no action
-        setTimeout(cleanup, 2000);
+        setTimeout(() => {
+            if (!closed) {
+                console.log('GTS: Confirm menu timeout, removing');
+                cleanup();
+            }
+        }, 2000);
     }
 
     // Event: Highlight triggers confirm menu
@@ -392,6 +421,7 @@
         if (window.getSelection) {
             const sel = window.getSelection().toString().trim();
             if (sel.length > 2) {
+                console.log('GTS: Highlighted text detected:', sel);
                 showConfirmSearchMenu(sel, async () => {
                     if (!await getApiKey()) {
                         await manageApiKey();
@@ -408,7 +438,10 @@
     document.addEventListener('keydown', e => {
         const popup = document.getElementById('gts-popup');
         if (!popup || popup.style.display === 'none') return;
-        if (e.key === 'Escape') closePopup();
+        if (e.key === 'Escape') {
+            closePopup();
+            console.log('GTS: ESC pressed, popup closed');
+        }
     });
 
 })();
