@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Granite Ticket Search (Interactive Popup)
 // @namespace    http://tampermonkey.net/
-// @version      4.3
+// @version      4.4
 // @description  Search Smartsheet by highlighting text and open results directly from the popup.
 // @author       ilakskills
 // @match        *://*/*
@@ -48,7 +48,7 @@
 
     function sanitize(str) {
         const div = document.createElement('div');
-        div.textContent = str;
+        div.textContent = str == null ? '' : str;
         return div.innerHTML;
     }
 
@@ -232,21 +232,32 @@
     // --- Main Logic: Search & Details ---
 
     function getObjectDetails(r) {
+        // Support flexible field names
+        const objectType = r.objectType || r.type;
+        const objectId = r.objectId || r.id;
+        const parentObjectId = r.parentObjectId || r.sheetId || r.parentId;
+        if (!objectType || !objectId || !parentObjectId) {
+            renderView('Error', `<div class="gts-error">Missing required fields (objectType, objectId, parentObjectId/sheetId/parentId).<br>
+            <pre>${sanitize(JSON.stringify(r, null, 2))}</pre>
+            </div>`);
+            return;
+        }
+
         showSpinner();
-        const url = buildApiUrl(r.objectType, r.parentObjectId, r.objectId);
+        const url = buildApiUrl(objectType, parentObjectId, objectId);
         if (!url) {
-            renderView('Unsupported Type', `<div class="gts-error">Cannot get details for object type: ${sanitize(r.objectType)}</div>`, true);
+            renderView('Unsupported Type', `<div class="gts-error">Cannot get details for object type: ${sanitize(objectType)}</div>`, true);
             return;
         }
         apiRequest({
             url,
             onSuccess: (data) => {
-                if (r.objectType.toUpperCase() === 'ROW') {
+                if (objectType.toUpperCase() === 'ROW') {
                     renderRowDetailsView(data);
-                } else if (r.objectType.toUpperCase() === 'DISCUSSION') {
+                } else if (objectType.toUpperCase() === 'DISCUSSION') {
                     renderDiscussionDetailsView(data);
                 } else {
-                    renderView('Unsupported Type', `<div class="gts-error">Cannot render details for object type: ${sanitize(r.objectType)}</div>`);
+                    renderView('Unsupported Type', `<div class="gts-error">Cannot render details for object type: ${sanitize(objectType)}</div>`);
                 }
             },
             onError: (title, message, raw = '') => {
