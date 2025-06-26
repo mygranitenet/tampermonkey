@@ -286,27 +286,32 @@
         return JSON.stringify(item).slice(0, 50);
     }
 
-    function renderSearchResultsView(results) {
-        if (!results.length) {
-            renderView('No Results', '<div class="gts-message">No results found.</div>');
-            return;
-        }
-        let html = '<ul class="gts-list">';
-        results.forEach((item, i) => {
-            let label = buildResultLabel(item);
-            html += `<li><strong>${sanitize(label)}</strong> <button data-index="${i}" class="gts-details-btn">Details</button></li>`;
-        });
-        html += '</ul>';
-        renderView('Search Results', html, true);
+   function renderSearchResultsView(results) {
+    // Log the full result set to the console for inspection
+    console.log('Smartsheet search results:', results);
 
-        // Attach click handlers for details
-        document.querySelectorAll('.gts-details-btn').forEach(btn => {
-            btn.onclick = function () {
-                const idx = parseInt(this.getAttribute('data-index'), 10);
-                getObjectDetails(results[idx]);
-            };
-        });
+    if (!results.length) {
+        renderView('No Results', '<div class="gts-message">No results found.</div>');
+        return;
     }
+    let html = '<ul class="gts-list">';
+    results.forEach((item, i) => {
+        let label = buildResultLabel(item);
+        html += `<li><strong>${sanitize(label)}</strong> <button data-index="${i}" class="gts-details-btn">Details</button></li>`;
+    });
+    html += '</ul>';
+    renderView('Search Results', html, true);
+
+    // Attach click handlers for details
+    document.querySelectorAll('.gts-details-btn').forEach(btn => {
+        btn.onclick = function () {
+            const idx = parseInt(this.getAttribute('data-index'), 10);
+            // Log the specific item you clicked for further inspection
+            console.log('Clicked result item:', results[idx]);
+            getObjectDetails(results[idx]);
+        };
+    });
+}
 
     function searchSmartsheet(q) {
         showSpinner();
