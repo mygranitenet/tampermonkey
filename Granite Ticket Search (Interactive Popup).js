@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Granite Ticket Search (Interactive Popup)
 // @namespace    http://tampermonkey.net/
-// @version      4.2
+// @version      4.3
 // @description  Search Smartsheet by highlighting text and open results directly from the popup.
 // @author       ilakskills
 // @match        *://*/*
@@ -255,25 +255,25 @@
         });
     }
 
-function buildResultLabel(item) {
-    // Prefer explicit title or name
-    if (item.title) return item.title;
-    if (item.name) return item.name;
-    // Use row/discussion with context if available
-    if (item.objectType && item.objectId) {
-        let label = `${item.objectType} (${item.objectId})`;
-        if (item.parentName) {
-            label += ` in ${item.parentName}`;
-        } else if (item.sheetName) {
-            label += ` in ${item.sheetName}`;
+    function buildResultLabel(item) {
+        // Prefer explicit title or name
+        if (item.title) return item.title;
+        if (item.name) return item.name;
+        // Use row/discussion with context if available
+        if (item.objectType && item.objectId) {
+            let label = `${item.objectType} (${item.objectId})`;
+            if (item.parentName) {
+                label += ` in ${item.parentName}`;
+            } else if (item.sheetName) {
+                label += ` in ${item.sheetName}`;
+            }
+            return label;
         }
-        return label;
+        if (item.sheetId) return `Sheet ${item.sheetId}`;
+        if (item.parentId) return `Item in ${item.parentId}`;
+        // Fallback to truncated JSON
+        return JSON.stringify(item).slice(0, 50);
     }
-    if (item.sheetId) return `Sheet ${item.sheetId}`;
-    if (item.parentId) return `Item in ${item.parentId}`;
-    // Fallback to truncated JSON
-    return JSON.stringify(item).slice(0, 50);
-}
 
     function renderSearchResultsView(results) {
         if (!results.length) {
