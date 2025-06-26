@@ -96,7 +96,8 @@
         collapse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>',
         expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>',
         close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>',
-        openExternal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>'
+        openExternal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>',
+        settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82 2 2 0 1 1-2.83 2.83 1.65 1.65 0 0 0-1.82.33 1.65 1.65 0 0 0-.33 1.82 2 2 0 1 1-3.58 0 1.65 1.65 0 0 0-1.82-.51 1.65 1.65 0 0 0-.33-.33 2 2 0 1 1 2.83-2.83 1.65 1.65 0 0 0 1.82-.33 1.65 1.65 0 0 0 .33-1.82 2 2 0 1 1 3.58 0"></path></svg>'
     };
 
     /** Creates the main popup UI structure and makes it interactive. */
@@ -114,6 +115,7 @@
                     <div id="gts-popup-header-buttons">
                         <button id="gts-popup-back" class="gts-header-btn" title="Back">${ICONS.back}</button>
                         <button id="gts-popup-collapse" class="gts-header-btn" title="Collapse">${ICONS.collapse}</button>
+                        <button id="gts-popup-settings" class="gts-header-btn" title="API Key">${ICONS.settings}</button>
                         <button id="gts-popup-close" class="gts-header-btn" title="Close">${ICONS.close}</button>
                     </div>
                 </div>
@@ -124,6 +126,7 @@
             document.getElementById('gts-popup-close').addEventListener('click', () => { popup.style.display = 'none'; });
             document.getElementById('gts-popup-back').addEventListener('click', () => { renderSearchResultsView(lastSearchResults); });
             collapseBtn.addEventListener('click', (e) => { e.stopPropagation(); popup.classList.toggle('gts-collapsed'); if (popup.classList.contains('gts-collapsed')) { collapseBtn.innerHTML = ICONS.expand; collapseBtn.title = 'Expand'; } else { collapseBtn.innerHTML = ICONS.collapse; collapseBtn.title = 'Collapse'; }});
+            document.getElementById('gts-popup-settings').addEventListener('click', manageApiKey);
             let pos1=0, pos2=0, pos3=0, pos4=0;
             header.onmousedown = (e) => { e.preventDefault(); pos3=e.clientX; pos4=e.clientY; document.onmouseup=() => {document.onmouseup=document.onmousemove=null;}; document.onmousemove=(ev) => {ev.preventDefault(); pos1=pos3-ev.clientX; pos2=pos4-ev.clientY; pos3=ev.clientX; pos4=ev.clientY; popup.style.top=(popup.offsetTop-pos2)+"px"; popup.style.left=(popup.offsetLeft-pos1)+"px";}; };
         }
@@ -182,10 +185,25 @@
     }
 
     /** Renders a detailed view of a discussion, passing the permalink. */
-    function renderDiscussionDetailsView(discussionData) {
+function renderDiscussionDetailsView(discussionData) {
         let content = `<h4 style="margin-top:0;">Discussion: ${discussionData.title}</h4>` + (discussionData.comments && discussionData.comments.length > 0 ? discussionData.comments.map(comment => `<div class="gts-comment"><div class="gts-comment-header"><strong>${comment.createdBy.name}</strong> on ${new Date(comment.createdAt).toLocaleString()}</div><div>${linkify(comment.text)}</div></div>`).join('') : '<div class="gts-message">No comments in this discussion.</div>');
         // Pass the permalink to the main render function
         renderView(`Discussion in ${discussionData.parentName}`, content, true, discussionData.permalink);
+}
+
+    async function manageApiKey() {
+        const current = await GM_getValue('SMARTSHEET_API_KEY', '');
+        const input = prompt('Enter your Smartsheet API Key (leave blank to clear):', current);
+        if (input === null) return;
+        if (input.trim()) {
+            await GM_setValue('SMARTSHEET_API_KEY', input.trim());
+            SMARTSHEET_API_KEY = input.trim();
+            alert('API key saved!');
+        } else {
+            await GM_setValue('SMARTSHEET_API_KEY', '');
+            SMARTSHEET_API_KEY = '';
+            alert('API key cleared.');
+        }
     }
 
     // --- The rest of the script is unchanged: prompt logic, event listeners, API calls etc. ---
