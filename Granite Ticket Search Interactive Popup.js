@@ -335,57 +335,58 @@
         const rect = range.getBoundingClientRect();
         return rect;
     }
+  
     function showConfirmSearchMenu(searchText, onConfirm) {
-        // Remove any existing menu
-        const existing = document.getElementById('gts-confirm-menu');
-        if (existing) existing.remove();
+    // Remove any existing menu
+    const existing = document.getElementById('gts-confirm-menu');
+    if (existing) existing.remove();
 
-        const rect = getSelectionRect();
-        if (!rect) return;
+    const rect = getSelectionRect();
+    if (!rect) return;
 
-        const menu = document.createElement('div');
-        menu.id = 'gts-confirm-menu';
-        menu.style.position = 'fixed';
-        menu.style.left = `${rect.left + window.scrollX}px`;
-        menu.style.top = `${rect.bottom + window.scrollY + 8}px`;
-        menu.style.background = '#fff';
-        menu.style.border = '1px solid #ccc';
-        menu.style.borderRadius = '8px';
-        menu.style.padding = '10px 16px';
-        menu.style.boxShadow = '0 2px 16px #0003';
-        menu.style.zIndex = '999999';
-        menu.style.fontFamily = 'system-ui,sans-serif';
-        menu.style.display = 'flex';
-        menu.style.alignItems = 'center';
-        menu.style.gap = '10px';
+    const menu = document.createElement('div');
+    menu.id = 'gts-confirm-menu';
+    menu.style.position = 'fixed';
+    menu.style.left = `${rect.left + window.scrollX}px`;
+    menu.style.top = `${rect.bottom + window.scrollY + 8}px`;
+    menu.style.background = '#fff';
+    menu.style.border = '1px solid #ccc';
+    menu.style.borderRadius = '8px';
+    menu.style.padding = '10px 16px';
+    menu.style.boxShadow = '0 2px 16px #0003';
+    menu.style.zIndex = '999999';
+    menu.style.fontFamily = 'system-ui,sans-serif';
+    menu.style.display = 'flex';
+    menu.style.alignItems = 'center';
+    menu.style.gap = '10px';
 
-        menu.innerHTML = `
-          <span>Search Smartsheet for: <b>${sanitize(searchText)}</b>?</span>
-          <button id="gts-confirm-search" style="margin-left:8px;">Search</button>
-          <button id="gts-confirm-cancel">Cancel</button>
-        `;
-        document.body.appendChild(menu);
+    menu.innerHTML = `
+      <span>Search Smartsheet for: <b>${sanitize(searchText)}</b>?</span>
+      <button id="gts-confirm-search" style="margin-left:8px;">Search</button>
+      <button id="gts-confirm-cancel">Cancel</button>
+    `;
+    document.body.appendChild(menu);
 
-        let clicked = false;
-        let timeout = setTimeout(() => {
-            if (!clicked) menu.remove();
-        }, 2000);
-
-        const cleanup = () => {
-            clearTimeout(timeout);
-            menu.remove();
-        };
-
-        menu.querySelector('#gts-confirm-search').onclick = () => {
-            clicked = true;
-            cleanup();
-            onConfirm();
-        };
-        menu.querySelector('#gts-confirm-cancel').onclick = () => {
-            clicked = true;
-            cleanup();
-        };
+    // Use a local variable to track closed state for THIS menu only
+    let closed = false;
+    function cleanup() {
+        if (closed) return;
+        closed = true;
+        if (menu.parentNode) menu.parentNode.removeChild(menu);
     }
+
+    menu.querySelector('#gts-confirm-search').onclick = (evt) => {
+        evt.stopPropagation();
+        cleanup();
+        onConfirm();
+    };
+    menu.querySelector('#gts-confirm-cancel').onclick = (evt) => {
+        evt.stopPropagation();
+        cleanup();
+    };
+    // Remove after 2 seconds if no action
+    setTimeout(cleanup, 2000);
+}
 
     // Event: Highlight triggers confirm menu
     document.addEventListener('mouseup', async function () {
