@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Granite Ticket Search (Interactive Popup)
+// @name         Granite Ticket Search Interactive Popup
 // @namespace    http://tampermonkey.net/
 // @version      4.8
 // @description  Search Smartsheet by highlighting text and open results directly from the popup, only after confirmation.
