@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Granite Ticket Search (Interactive Popup)
 // @namespace    http://tampermonkey.net/
-// @version      4.4
+// @version      4.5
 // @description  Search Smartsheet by highlighting text and open results directly from the popup.
 // @author       ilakskills
 // @match        *://*/*
@@ -15,19 +15,12 @@
 (function () {
     'use strict';
 
-    // --- Configuration ---
     const SMARTSHEET_API_BASE_URL = 'https://api.smartsheet.com/2.0';
     let SMARTSHEET_API_KEY = '';
 
-    // --- CSS ---
     GM_addStyle(`
-        :root {
-            --gts-primary: #0d6efd; --gts-text-on-primary: #004085; --gts-bg-on-primary: #cce5ff; --gts-border-on-primary: #b8daff;
-            --gts-bg: #fff; --gts-header-bg: #f8f9fa; --gts-border: #dee2e6; --gts-text: #212529; --gts-link: #0d6efd;
-            --gts-shadow: 0 4px 24px rgba(0,0,0,0.10);
-        }
-        #gts-popup { position: fixed; z-index: 10001; top: 70px; left: 50%; transform: translateX(-50%); background: var(--gts-bg); box-shadow: var(--gts-shadow); border-radius: 12px; min-width: 400px; max-width: 90vw; font-family: system-ui,sans-serif; border: 1px solid var(--gts-border);}
-        #gts-popup-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: var(--gts-header-bg); border-bottom: 1px solid var(--gts-border); border-radius: 12px 12px 0 0; cursor: move;}
+        #gts-popup { position: fixed; z-index: 10001; top: 70px; left: 50%; transform: translateX(-50%); background: #fff; box-shadow: 0 4px 24px rgba(0,0,0,0.10); border-radius: 12px; min-width: 400px; max-width: 90vw; font-family: system-ui,sans-serif; border: 1px solid #dee2e6;}
+        #gts-popup-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; border-radius: 12px 12px 0 0; cursor: move;}
         #gts-popup-title { font-size: 16px; font-weight: 600;}
         #gts-popup-header-buttons { display: flex; gap: 8px;}
         #gts-popup-content { padding: 18px 20px;}
@@ -35,16 +28,14 @@
         .gts-section { margin-top: 25px; border-top: 1px solid #eee; padding-top: 20px;}
         .gts-comment { margin-bottom: 10px; }
         .gts-comment-header { font-size: 13px; color: #555; margin-bottom: 2px;}
-        .gts-spinner { border: 4px solid #f3f3f3; border-top: 4px solid var(--gts-primary); border-radius: 50%; width: 32px; height: 32px; animation: spin 1s linear infinite; margin: 20px auto; display: block;}
+        .gts-spinner { border: 4px solid #f3f3f3; border-top: 4px solid #0d6efd; border-radius: 50%; width: 32px; height: 32px; animation: spin 1s linear infinite; margin: 20px auto; display: block;}
         @keyframes spin { 0%{transform:rotate(0deg);} 100%{transform:rotate(360deg);} }
         .gts-error { color: #842029; background: #f8d7da; border: 1px solid #f5c2c7; border-radius: 8px; padding: 10px;}
         .gts-list { list-style: none; padding: 0; margin: 0; }
         .gts-list li { padding: 8px 0; }
         #gts-popup-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #888;}
-        #gts-popup-close:focus { outline: 2px solid var(--gts-primary);}
+        #gts-popup-close:focus { outline: 2px solid #0d6efd;}
     `);
-
-    // --- Utility Functions ---
 
     function sanitize(str) {
         const div = document.createElement('div');
@@ -61,8 +52,6 @@
     function showSpinner() {
         renderView('Loading...', '<div class="gts-spinner" aria-label="Loading"></div>', true);
     }
-
-    // --- Popup UI ---
 
     function createPopup() {
         if (document.getElementById('gts-popup')) return;
@@ -120,8 +109,6 @@
         }
     }
 
-    // --- API Key Management ---
-
     async function getApiKey() {
         if (!SMARTSHEET_API_KEY) {
             SMARTSHEET_API_KEY = await GM_getValue('SMARTSHEET_API_KEY', '');
@@ -147,8 +134,6 @@
             alert('API key cleared.');
         }
     }
-
-    // --- Smartsheet API ---
 
     function buildApiUrl(objectType, parentObjectId, objectId) {
         const t = objectType.toUpperCase();
@@ -191,8 +176,6 @@
         });
     }
 
-    // --- Renderers ---
-
     function renderRowDetailsView(rowData) {
         const columnMap = rowData.columns.reduce((map, col) => ({ ...map, [col.id]: col.title }), {});
         let content = '<h4>Row Details</h4><table class="gts-details-table">';
@@ -229,20 +212,65 @@
         renderView(`Discussion in ${sanitize(discussionData.parentName)}`, content, true);
     }
 
-    // --- Main Logic: Search & Details ---
+    // --- NEW BUILD LABEL FUNCTION ---
+    function buildResultLabel(item) {
+        if (item.objectType === "row") {
+            let label = sanitize(item.text || "");
+            // Only show context if it's meaningful & not just an ID or empty
+            if (
+                item.contextData &&
+                item.contextData[0] &&
+                !/^\d+$/.test(item.contextData[0].trim())
+            ) {
+                label += " — " + sanitize(item.contextData[0]);
+            }
+            label += ` (row ${item.objectId})`;
+            if (item.parentObjectName) {
+                label += ` in ${sanitize(item.parentObjectName)}`;
+            }
+            return label;
+        }
+        if (item.objectType === "sheet") {
+            let label = sanitize(item.text || "Untitled");
+            label += ` (sheet ${item.objectId})`;
+            return label;
+        }
+        // Fallback
+        return JSON.stringify(item).slice(0, 80);
+    }
+
+    function renderSearchResultsView(results) {
+        console.log('Smartsheet search results:', results);
+
+        if (!results.length) {
+            renderView('No Results', '<div class="gts-message">No results found.</div>');
+            return;
+        }
+        let html = '<ul class="gts-list">';
+        results.forEach((item, i) => {
+            let label = buildResultLabel(item);
+            html += `<li><strong>${label}</strong> <button data-index="${i}" class="gts-details-btn">Details</button></li>`;
+        });
+        html += '</ul>';
+        renderView('Search Results', html, true);
+
+        document.querySelectorAll('.gts-details-btn').forEach(btn => {
+            btn.onclick = function () {
+                const idx = parseInt(this.getAttribute('data-index'), 10);
+                console.log('Clicked result item:', results[idx]);
+                getObjectDetails(results[idx]);
+            };
+        });
+    }
 
     function getObjectDetails(r) {
-        // Support flexible field names
         const objectType = r.objectType || r.type;
         const objectId = r.objectId || r.id;
         const parentObjectId = r.parentObjectId || r.sheetId || r.parentId;
         if (!objectType || !objectId || !parentObjectId) {
-            renderView('Error', `<div class="gts-error">Missing required fields (objectType, objectId, parentObjectId/sheetId/parentId).<br>
-            <pre>${sanitize(JSON.stringify(r, null, 2))}</pre>
-            </div>`);
+            renderView('Error', `<div class="gts-error">Missing required fields.<br><pre>${sanitize(JSON.stringify(r, null, 2))}</pre></div>`);
             return;
         }
-
         showSpinner();
         const url = buildApiUrl(objectType, parentObjectId, objectId);
         if (!url) {
@@ -266,53 +294,6 @@
         });
     }
 
-    function buildResultLabel(item) {
-        // Prefer explicit title or name
-        if (item.title) return item.title;
-        if (item.name) return item.name;
-        // Use row/discussion with context if available
-        if (item.objectType && item.objectId) {
-            let label = `${item.objectType} (${item.objectId})`;
-            if (item.parentName) {
-                label += ` in ${item.parentName}`;
-            } else if (item.sheetName) {
-                label += ` in ${item.sheetName}`;
-            }
-            return label;
-        }
-        if (item.sheetId) return `Sheet ${item.sheetId}`;
-        if (item.parentId) return `Item in ${item.parentId}`;
-        // Fallback to truncated JSON
-        return JSON.stringify(item).slice(0, 50);
-    }
-
-   function renderSearchResultsView(results) {
-    // Log the full result set to the console for inspection
-    console.log('Smartsheet search results:', results);
-
-    if (!results.length) {
-        renderView('No Results', '<div class="gts-message">No results found.</div>');
-        return;
-    }
-    let html = '<ul class="gts-list">';
-    results.forEach((item, i) => {
-        let label = buildResultLabel(item);
-        html += `<li><strong>${sanitize(label)}</strong> <button data-index="${i}" class="gts-details-btn">Details</button></li>`;
-    });
-    html += '</ul>';
-    renderView('Search Results', html, true);
-
-    // Attach click handlers for details
-    document.querySelectorAll('.gts-details-btn').forEach(btn => {
-        btn.onclick = function () {
-            const idx = parseInt(this.getAttribute('data-index'), 10);
-            // Log the specific item you clicked for further inspection
-            console.log('Clicked result item:', results[idx]);
-            getObjectDetails(results[idx]);
-        };
-    });
-}
-
     function searchSmartsheet(q) {
         showSpinner();
         const url = `${SMARTSHEET_API_BASE_URL}/search?query=${encodeURIComponent(q)}`;
@@ -328,9 +309,7 @@
         });
     }
 
-    // --- Event Triggers (Highlight to search) ---
-
-    document.addEventListener('mouseup', async function (e) {
+    document.addEventListener('mouseup', async function () {
         if (window.getSelection) {
             const sel = window.getSelection().toString().trim();
             if (sel.length > 2) {
@@ -344,7 +323,6 @@
         }
     });
 
-    // --- Keyboard Shortcuts ---
     document.addEventListener('keydown', e => {
         const popup = document.getElementById('gts-popup');
         if (!popup || popup.style.display === 'none') return;
