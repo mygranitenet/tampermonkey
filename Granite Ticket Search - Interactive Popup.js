@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Granite Ticket Search (Interactive Popup)
 // @namespace    http://tampermonkey.net/
-// @version      4.7
+// @version      4.8
 // @description  Search Smartsheet by highlighting text and open results directly from the popup, only after confirmation.
 // @author       ilakskills
 // @match        *://*/*
@@ -369,7 +369,7 @@
         let clicked = false;
         let timeout = setTimeout(() => {
             if (!clicked) menu.remove();
-        }, 1000);
+        }, 2000);
 
         const cleanup = () => {
             clearTimeout(timeout);
