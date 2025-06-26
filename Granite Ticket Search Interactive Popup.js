@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Granite Ticket Search Interactive Popup (with Logging)
+// @name         Granite Ticket Search Interactive Popup (with Logging & Confirm Menu Fix)
 // @namespace    http://tampermonkey.net/
-// @version      4.10
-// @description  Search Smartsheet by highlighting text and open results directly from the popup, only after confirmation. Now with logging!
+// @version      4.11
+// @description  Search Smartsheet by highlighting text and open results directly from the popup, only after confirmation. Now with logging and confirm menu fix!
 // @author       ilakskills
 // @match        *://*/*
 // @connect      api.smartsheet.com
@@ -15,31 +15,12 @@
 (function () {
     'use strict';
 
+    let gtsConfirmMenuOpen = false;
+
     const SMARTSHEET_API_BASE_URL = 'https://api.smartsheet.com/2.0';
     let SMARTSHEET_API_KEY = '';
 
-    // CSS for popups and table
-    GM_addStyle(`
-        #gts-popup { position: fixed; z-index: 10001; top: 70px; left: 50%; transform: translateX(-50%); background: #fff; box-shadow: 0 4px 24px rgba(0,0,0,0.10); border-radius: 12px; min-width: 400px; max-width: 90vw; font-family: system-ui,sans-serif; border: 1px solid #dee2e6;}
-        #gts-popup-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; border-radius: 12px 12px 0 0; cursor: move;}
-        #gts-popup-title { font-size: 16px; font-weight: 600;}
-        #gts-popup-header-buttons { display: flex; gap: 8px;}
-        #gts-popup-content { padding: 18px 20px; max-height: 60vh; overflow-y: auto; }
-        .gts-details-table { width: 100%; margin-top: 10px; border-collapse: collapse;}
-        .gts-details-table th, .gts-details-table td { padding: 5px 8px; border-bottom: 1px solid #eee;}
-        .gts-section { margin-top: 25px; border-top: 1px solid #eee; padding-top: 20px;}
-        .gts-comment { margin-bottom: 10px; }
-        .gts-comment-header { font-size: 13px; color: #555; margin-bottom: 2px;}
-        .gts-spinner { border: 4px solid #f3f3f3; border-top: 4px solid #0d6efd; border-radius: 50%; width: 32px; height: 32px; animation: spin 1s linear infinite; margin: 20px auto; display: block;}
-        @keyframes spin { 0%{transform:rotate(0deg);} 100%{transform:rotate(360deg);} }
-        .gts-error { color: #842029; background: #f8d7da; border: 1px solid #f5c2c7; border-radius: 8px; padding: 10px;}
-        .gts-list { list-style: none; padding: 0; margin: 0; }
-        .gts-list li { padding: 8px 0; }
-        #gts-popup-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #888;}
-        #gts-popup-close:focus { outline: 2px solid #0d6efd;}
-        #gts-confirm-menu { animation: fadeIn 0.1s; }
-        @keyframes fadeIn { from {opacity:0;} to {opacity:1;} }
-    `);
+    // ... [All your functions from previous script: sanitize, linkify, showSpinner, createPopup, renderView, closePopup, makeDraggable, getApiKey, manageApiKey, buildApiUrl, apiRequest, renderRowDetailsView, renderDiscussionDetailsView, buildResultLabel, renderSearchResultsView, getObjectDetails, searchSmartsheet] ...
 
     // Utility functions
     function sanitize(str) {
@@ -112,8 +93,6 @@
             document.removeEventListener('mouseup', stopDrag);
         }
     }
-
-    // API Key Management
     async function getApiKey() {
         if (!SMARTSHEET_API_KEY) {
             SMARTSHEET_API_KEY = await GM_getValue('SMARTSHEET_API_KEY', '');
@@ -141,8 +120,6 @@
             console.log('GTS: API key cleared');
         }
     }
-
-    // Smartsheet API
     function buildApiUrl(objectType, parentObjectId, objectId) {
         const t = (objectType || '').toUpperCase();
         if (t === 'ROW') {
@@ -187,8 +164,6 @@
             }
         });
     }
-
-    // Details View (Row)
     function renderRowDetailsView(rowData) {
         console.log('GTS: Render Row Details', rowData);
         const columnMap = rowData.columns.reduce((map, col) => ({ ...map, [col.id]: col.title }), {});
@@ -197,16 +172,12 @@
             .map(cell => `<tr><th>${sanitize(columnMap[cell.columnId])}</th><td>${linkify(cell.displayValue || cell.value)}</td></tr>`)
             .join('');
         content += '</table>';
-
-        // Attachments
         if (rowData.attachments && rowData.attachments.length > 0) {
             content += '<div class="gts-section"><h5>Attachments</h5><ul class="gts-list">' +
                 rowData.attachments.map(att =>
                     `<li><a href="${sanitize(att.url)}" target="_blank" rel="noopener noreferrer">${sanitize(att.name)}</a> <small>(${sanitize(att.mimeType)})</small></li>`
                 ).join('') + '</ul></div>';
         }
-
-        // Discussions/comments
         if (rowData.discussions && rowData.discussions.length > 0) {
             content += '<div class="gts-section"><h5>Comments</h5>' +
                 rowData.discussions.map(disc =>
@@ -217,8 +188,6 @@
         }
         renderView(`Row in ${sanitize(rowData.sheetName)}`, content, true);
     }
-
-    // Details View (Discussion)
     function renderDiscussionDetailsView(discussionData) {
         console.log('GTS: Render Discussion Details', discussionData);
         let content = `<h4 style="margin-top:0;">Discussion: ${sanitize(discussionData.title)}</h4>` +
@@ -228,8 +197,6 @@
                 ).join('') : '<div class="gts-message">No comments in this discussion.</div>');
         renderView(`Discussion in ${sanitize(discussionData.parentName)}`, content, true);
     }
-
-    // Results Label
     function buildResultLabel(item) {
         if (item.objectType === "row") {
             let label = sanitize(item.text || "");
@@ -251,15 +218,12 @@
         }
         return JSON.stringify(item).slice(0, 80);
     }
-
-    // Results Table
     function renderSearchResultsView(results) {
         console.log('GTS: renderSearchResultsView', results);
         if (!results.length) {
             renderView('No Results', '<div class="gts-message">No results found.</div>');
             return;
         }
-
         let html = `
             <div style="overflow-x:auto;">
             <table style="width:100%; border-collapse:collapse; font-size:1em;">
@@ -292,8 +256,6 @@
             };
         });
     }
-
-    // Details Handler
     function getObjectDetails(r) {
         const objectType = r.objectType || r.type;
         const objectId = r.objectId || r.id;
@@ -325,8 +287,6 @@
             }
         });
     }
-
-    // Search
     function searchSmartsheet(q) {
         console.log('GTS: searchSmartsheet', q);
         showSpinner();
@@ -343,7 +303,7 @@
         });
     }
 
-    // Confirm Menu with DETAILED LOGGING
+    // Confirm Menu with Fix
     function getSelectionRect() {
         const selection = window.getSelection();
         if (!selection.rangeCount) return null;
@@ -353,6 +313,12 @@
         return rect;
     }
     function showConfirmSearchMenu(searchText, onConfirm) {
+        if (gtsConfirmMenuOpen) {
+            console.log('GTS: Confirm menu already open, ignoring highlight');
+            return;
+        }
+        gtsConfirmMenuOpen = true;
+
         const existing = document.getElementById('gts-confirm-menu');
         if (existing) {
             existing.remove();
@@ -362,6 +328,7 @@
         const rect = getSelectionRect();
         if (!rect) {
             console.log('GTS: No selection rect found');
+            gtsConfirmMenuOpen = false;
             return;
         }
 
@@ -394,6 +361,7 @@
             if (closed) return;
             closed = true;
             if (menu.parentNode) menu.parentNode.removeChild(menu);
+            gtsConfirmMenuOpen = false;
             console.log('GTS: Confirm menu removed');
         }
 
