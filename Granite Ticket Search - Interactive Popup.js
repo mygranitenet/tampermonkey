@@ -335,70 +335,56 @@
         const rect = range.getBoundingClientRect();
         return rect;
     }
-    function showConfirmSearchMenu(searchText, onConfirm) {
-        // Remove any existing menu
-        const existing = document.getElementById('gts-confirm-menu');
-        if (existing) existing.remove();
+   function showConfirmSearchMenu(searchText, onConfirm) {
+    // Remove any existing menu
+    const existing = document.getElementById('gts-confirm-menu');
+    if (existing) existing.remove();
 
-        const rect = getSelectionRect();
-        if (!rect) return;
+    const rect = getSelectionRect();
+    if (!rect) return;
 
-        const menu = document.createElement('div');
-        menu.id = 'gts-confirm-menu';
-        menu.style.position = 'fixed';
-        menu.style.left = `${rect.left + window.scrollX}px`;
-        menu.style.top = `${rect.bottom + window.scrollY + 8}px`;
-        menu.style.background = '#fff';
-        menu.style.border = '1px solid #ccc';
-        menu.style.borderRadius = '8px';
-        menu.style.padding = '10px 16px';
-        menu.style.boxShadow = '0 2px 16px #0003';
-        menu.style.zIndex = '999999';
-        menu.style.fontFamily = 'system-ui,sans-serif';
-        menu.style.display = 'flex';
-        menu.style.alignItems = 'center';
-        menu.style.gap = '10px';
+    const menu = document.createElement('div');
+    menu.id = 'gts-confirm-menu';
+    // ... (style code)
+    menu.innerHTML = `
+      <span>Search Smartsheet for: <b>${sanitize(searchText)}</b>?</span>
+      <button id="gts-confirm-search" style="margin-left:8px;">Search</button>
+      <button id="gts-confirm-cancel">Cancel</button>
+    `;
+    document.body.appendChild(menu);
 
-        menu.innerHTML = `
-          <span>Search Smartsheet for: <b>${sanitize(searchText)}</b>?</span>
-          <button id="gts-confirm-search" style="margin-left:8px;">Search</button>
-          <button id="gts-confirm-cancel">Cancel</button>
-        `;
-        document.body.appendChild(menu);
+    let timeout = setTimeout(() => {
+        menu.remove();
+    }, 2000);
 
-        // Remove after 1 second if no action
-        let timeout = setTimeout(() => {
-            menu.remove();
-        }, 1000);
+    const cleanup = () => {
+        clearTimeout(timeout);
+        menu.remove();
+    };
 
-        const cleanup = () => {
-            clearTimeout(timeout);
-            menu.remove();
-        };
-
-        menu.querySelector('#gts-confirm-search').onclick = () => {
-            cleanup();
-            onConfirm();
-        };
-        menu.querySelector('#gts-confirm-cancel').onclick = cleanup;
-    }
+    menu.querySelector('#gts-confirm-search').onclick = () => {
+        cleanup();
+        onConfirm();    // <--- This must call your search function
+    };
+    menu.querySelector('#gts-confirm-cancel').onclick = cleanup;
+}
 
     // Event: Highlight triggers confirm menu
-    document.addEventListener('mouseup', async function () {
-        if (window.getSelection) {
-            const sel = window.getSelection().toString().trim();
-            if (sel.length > 2) {
-                showConfirmSearchMenu(sel, async () => {
-                    if (!await getApiKey()) {
-                        await manageApiKey();
-                    }
-                    if (await getApiKey()) {
-                        searchSmartsheet(sel);
-                    }
-                });
-            }
+document.addEventListener('mouseup', async function () {
+    if (window.getSelection) {
+        const sel = window.getSelection().toString().trim();
+        if (sel.length > 2) {
+            showConfirmSearchMenu(sel, async () => {
+                if (!await getApiKey()) {
+                    await manageApiKey();
+                }
+                if (await getApiKey()) {
+                    searchSmartsheet(sel);
+                }
+            });
         }
-    });
+    }
+});
 
     // ESC closes popup
     document.addEventListener('keydown', e => {
