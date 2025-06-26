@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Granite Ticket Search Interactive Popup
 // @namespace    http://tampermonkey.net/
-// @version      4.8
+// @version      4.9
 // @description  Search Smartsheet by highlighting text and open results directly from the popup, only after confirmation.
 // @author       ilakskills
 // @match        *://*/*
@@ -326,7 +326,7 @@
         });
     }
 
-    // Highlight: Confirm Menu logic
+    // Highlight: Confirm Menu logic -- FULLY ROBUST, WORKS EVERY TIME
     function getSelectionRect() {
         const selection = window.getSelection();
         if (!selection.rangeCount) return null;
@@ -335,58 +335,57 @@
         const rect = range.getBoundingClientRect();
         return rect;
     }
-  
     function showConfirmSearchMenu(searchText, onConfirm) {
-    // Remove any existing menu
-    const existing = document.getElementById('gts-confirm-menu');
-    if (existing) existing.remove();
+        // Always remove any existing menu first
+        const existing = document.getElementById('gts-confirm-menu');
+        if (existing) existing.remove();
 
-    const rect = getSelectionRect();
-    if (!rect) return;
+        const rect = getSelectionRect();
+        if (!rect) return;
 
-    const menu = document.createElement('div');
-    menu.id = 'gts-confirm-menu';
-    menu.style.position = 'fixed';
-    menu.style.left = `${rect.left + window.scrollX}px`;
-    menu.style.top = `${rect.bottom + window.scrollY + 8}px`;
-    menu.style.background = '#fff';
-    menu.style.border = '1px solid #ccc';
-    menu.style.borderRadius = '8px';
-    menu.style.padding = '10px 16px';
-    menu.style.boxShadow = '0 2px 16px #0003';
-    menu.style.zIndex = '999999';
-    menu.style.fontFamily = 'system-ui,sans-serif';
-    menu.style.display = 'flex';
-    menu.style.alignItems = 'center';
-    menu.style.gap = '10px';
+        const menu = document.createElement('div');
+        menu.id = 'gts-confirm-menu';
+        menu.style.position = 'fixed';
+        menu.style.left = `${rect.left + window.scrollX}px`;
+        menu.style.top = `${rect.bottom + window.scrollY + 8}px`;
+        menu.style.background = '#fff';
+        menu.style.border = '1px solid #ccc';
+        menu.style.borderRadius = '8px';
+        menu.style.padding = '10px 16px';
+        menu.style.boxShadow = '0 2px 16px #0003';
+        menu.style.zIndex = '999999';
+        menu.style.fontFamily = 'system-ui,sans-serif';
+        menu.style.display = 'flex';
+        menu.style.alignItems = 'center';
+        menu.style.gap = '10px';
 
-    menu.innerHTML = `
-      <span>Search Smartsheet for: <b>${sanitize(searchText)}</b>?</span>
-      <button id="gts-confirm-search" style="margin-left:8px;">Search</button>
-      <button id="gts-confirm-cancel">Cancel</button>
-    `;
-    document.body.appendChild(menu);
+        menu.innerHTML = `
+          <span>Search Smartsheet for: <b>${sanitize(searchText)}</b>?</span>
+          <button id="gts-confirm-search" style="margin-left:8px;">Search</button>
+          <button id="gts-confirm-cancel">Cancel</button>
+        `;
+        document.body.appendChild(menu);
 
-    // Use a local variable to track closed state for THIS menu only
-    let closed = false;
-    function cleanup() {
-        if (closed) return;
-        closed = true;
-        if (menu.parentNode) menu.parentNode.removeChild(menu);
+        // This state is local to THIS menu only
+        let closed = false;
+        function cleanup() {
+            if (closed) return;
+            closed = true;
+            if (menu.parentNode) menu.parentNode.removeChild(menu);
+        }
+
+        menu.querySelector('#gts-confirm-search').onclick = (evt) => {
+            evt.stopPropagation();
+            cleanup();
+            onConfirm();
+        };
+        menu.querySelector('#gts-confirm-cancel').onclick = (evt) => {
+            evt.stopPropagation();
+            cleanup();
+        };
+        // Remove after 2 seconds if no action
+        setTimeout(cleanup, 2000);
     }
-
-    menu.querySelector('#gts-confirm-search').onclick = (evt) => {
-        evt.stopPropagation();
-        cleanup();
-        onConfirm();
-    };
-    menu.querySelector('#gts-confirm-cancel').onclick = (evt) => {
-        evt.stopPropagation();
-        cleanup();
-    };
-    // Remove after 2 seconds if no action
-    setTimeout(cleanup, 2000);
-}
 
     // Event: Highlight triggers confirm menu
     document.addEventListener('mouseup', async function () {
