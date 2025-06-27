@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         WorkMarket Transformer
 // @namespace    http://tampermonkey.net/
-// @version      18.4
+// @version      18.5
 // @description  Transforms the WorkMarket assignments page into a powerful, sortable, and exportable data table with advanced filtering and scoring.
-// @author       ilakskill
+// @author       Your Name (Refactored with AI)
 // @match        https://www.workmarket.com/assignments*
 // @match        https://www.workmarket.com/workorders*
 // @grant        none
@@ -15,7 +15,7 @@
 
     class WorkMarketTransformer {
         config = {
-            SCRIPT_PREFIX: '[WM TRANSFORMER V18.4]',
+            SCRIPT_PREFIX: '[WM TRANSFORMER V18.5]',
             DEBOUNCE_DELAY: 250,
             ASSIGNMENT_ITEM_SELECTOR: '.results-row.work',
             CSS: `
@@ -42,7 +42,8 @@
                 .wm-transformer-overlay.minimized .overlay-content, .wm-transformer-overlay.minimized .overlay-resize-handle { display: none; }
                 .wm-transformer-overlay.maximized-true { top: 5px !important; left: 5px !important; width: calc(100vw - 10px) !important; height: calc(100vh - 10px) !important; border-radius: 0; }
                 .overlay-header { background-color: #343a40; color: white; padding: 8px 12px; cursor: move; display: flex; justify-content: space-between; align-items: center; height: 40px; box-sizing: border-box; }
-                .overlay-controls button { background: none; border: none; color: white; font-size: 16px; margin-left: 8px; cursor: pointer; padding: 2px 5px; }
+                .overlay-controls button { background: none; border: none; color: white; font-size: 14px; margin-left: 8px; cursor: pointer; padding: 2px 5px; font-weight: bold; }
+                .overlay-controls .overlay-icon-btn { font-size: 16px; }
                 .overlay-content { padding: 10px; flex-grow: 1; overflow: auto; background-color: white; }
                 .overlay-resize-handle { width: 15px; height: 15px; background-color: #ddd; position: absolute; right: 0; bottom: 0; cursor: nwse-resize; }
                 .generic-modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); display: none; justify-content: center; align-items: center; z-index: 10000; padding: 15px; box-sizing: border-box;}
@@ -79,140 +80,16 @@
             ],
         };
 
-        fullTableData = [];
-        displayedTableData = [];
-        currentSort = { column: 'timestamp', direction: 'desc' };
-        currentAssignmentTechsData = {};
-        currentAssignmentViewDataCache = {};
-        currentModalAssignmentIndex = -1;
-        currentModalTechIndex = -1;
-        currentAssignmentId = null;
-        observer = null;
-        mainOverlay = null;
-        originalResultsContainerSource = null;
-        transformationRunning = false;
-        isDraggingOverlay = false; isResizingOverlay = false;
-        overlayDragStartX = 0; overlayDragStartY = 0;
-        overlayOriginalWidth = 0; overlayOriginalHeight = 0;
-        overlayPreMaximizeDimensions = {};
-
-        constructor() {
-            this._init();
-        }
-
-        _init() {
-            console.log(`${this.config.SCRIPT_PREFIX} Initializing...`);
-            this.originalResultsContainerSource = document.getElementById('assignment_list_results');
-            if (!this.originalResultsContainerSource) {
-                console.log(`${this.config.SCRIPT_PREFIX} Not on a recognized assignments page. Script will not run.`);
-                return;
-            }
-            this._injectStyles();
-            this._modifyPageSizeSelect();
-            this._createUI();
-            this._startObserver();
-        }
-
-        _injectStyles() {
-            if (document.getElementById('wmTransformerStyles')) return;
-            const styleElement = document.createElement('style');
-            styleElement.id = 'wmTransformerStyles';
-            styleElement.textContent = this.config.CSS;
-            document.head.appendChild(styleElement);
-        }
-
-        _modifyPageSizeSelect() {
-            const pageSizeSelect = document.getElementById('assignment_list_size');
-            if (pageSizeSelect && !pageSizeSelect.dataset.modified) {
-                pageSizeSelect.innerHTML = '';
-                for (let i = 100; i <= 1000; i += 50) {
-                    const option = document.createElement('option');
-                    option.value = i; option.textContent = i; pageSizeSelect.appendChild(option);
-                }
-                pageSizeSelect.dataset.modified = 'true';
-            }
-        }
-
-        _createUI() {
-            this._createMainOverlay();
-            this._createShowButton();
-        }
-
-        _createMainOverlay() {
-            if (document.getElementById('wmTransformerOverlay')) return;
-            this.mainOverlay = document.createElement('div');
-            this.mainOverlay.id = 'wmTransformerOverlay';
-            this.mainOverlay.className = 'wm-transformer-overlay';
-            this.mainOverlay.innerHTML = `
-                <div class="overlay-header">
-                    <span>WorkMarket Enhanced Assignments</span>
-                    <div class="overlay-controls">
-                        <button class="overlay-refresh-btn" title="Refresh Data">🔄</button>
-                        <button class="download-csv-btn" title="Download CSV">📥 CSV</button>
-                        <button class="overlay-minimize-btn" title="Minimize">_</button>
-                        <button class="overlay-maximize-btn" title="Maximize">□</button>
-                        <button class="overlay-close-btn" title="Hide">X</button>
-                    </div>
-                </div>
-                <div class="overlay-content"></div>
-                <div class="overlay-resize-handle"></div>`;
-            document.body.appendChild(this.mainOverlay);
-
-            this.mainOverlay.querySelector('.overlay-header').addEventListener('mousedown', this._startDragOverlay.bind(this));
-            this.mainOverlay.querySelector('.overlay-resize-handle').addEventListener('mousedown', this._startResizeOverlay.bind(this));
-            this.mainOverlay.querySelector('.overlay-refresh-btn').addEventListener('click', () => this._runTransformation());
-            this.mainOverlay.querySelector('.download-csv-btn').addEventListener('click', () => this.exportDataToCsv());
-            this.mainOverlay.querySelector('.overlay-minimize-btn').addEventListener('click', () => this.mainOverlay.classList.toggle('minimized'));
-            this.mainOverlay.querySelector('.overlay-maximize-btn').addEventListener('click', () => this._toggleMaximizeOverlay());
-            this.mainOverlay.querySelector('.overlay-close-btn').addEventListener('click', () => this.mainOverlay.style.display = 'none');
-        }
-
-        _createShowButton() {
-            if (document.getElementById('wm-transformer-view-btn')) return;
-            const targetArea = document.querySelector('.dashboard-quick-actions');
-            if (!targetArea) return;
-
-            const showBtn = document.createElement('button');
-            showBtn.id = 'wm-transformer-view-btn';
-            showBtn.className = 'button -new tooltipped tooltipped-n';
-            showBtn.setAttribute('aria-label', 'Show Transformer Table View');
-            showBtn.innerHTML = `<div class="button--content">T-View</div>`;
-            
-            showBtn.onclick = () => {
-                if(this.mainOverlay) this.mainOverlay.style.display = 'flex';
-            };
-            
-            targetArea.prepend(showBtn);
-        }
-
-        _createTechModal() {
-            if (document.getElementById('techDetailModalOverlay')) return document.getElementById('techDetailModalOverlay');
-            const overlay = document.createElement('div');
-            overlay.id = 'techDetailModalOverlay';
-            overlay.className = 'generic-modal-overlay';
-            overlay.innerHTML = `<div class="generic-modal-content"><div class="generic-modal-header"><h3>Technician Details</h3><button class="generic-modal-close">×</button></div><div class="generic-modal-body"><div id="techModalDetailsGrid" class="generic-modal-detail-grid"></div></div><div class="generic-modal-footer"><button id="prevTechBtn">« Prev</button><span id="techCounter"></span><button id="nextTechBtn">Next »</button></div></div>`;
-            document.body.appendChild(overlay);
-            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; });
-            overlay.querySelector('.generic-modal-close').addEventListener('click', () => overlay.style.display = 'none');
-            overlay.querySelector('#prevTechBtn').addEventListener('click', () => this._showPrevTech());
-            overlay.querySelector('#nextTechBtn').addEventListener('click', () => this._showNextTech());
-            return overlay;
-        }
-
-        _createAssignmentDetailsModal() {
-            if (document.getElementById('assignmentDetailModalOverlay')) return document.getElementById('assignmentDetailModalOverlay');
-            const overlay = document.createElement('div');
-            overlay.id = 'assignmentDetailModalOverlay';
-            overlay.className = 'generic-modal-overlay';
-            overlay.innerHTML = `<div class="generic-modal-content"><div class="generic-modal-header"><h3>Assignment Details</h3><button class="generic-modal-close">×</button></div><div class="generic-modal-body"><div id="assignmentModalDetailsGrid" class="generic-modal-detail-grid"></div></div><div class="generic-modal-footer"><button id="prevAssignmentBtn">« Prev</button><span id="assignmentCounter"></span><button id="nextAssignmentBtn">Next »</button></div></div>`;
-            document.body.appendChild(overlay);
-            overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; });
-            overlay.querySelector('.generic-modal-close').addEventListener('click', () => overlay.style.display = 'none');
-            overlay.querySelector('#prevAssignmentBtn').addEventListener('click', () => this._showPrevAssignment());
-            overlay.querySelector('#nextAssignmentBtn').addEventListener('click', () => this._showNextAssignment());
-            return overlay;
-        }
-
+        fullTableData = []; displayedTableData = []; currentSort = { column: 'timestamp', direction: 'desc' }; currentAssignmentTechsData = {}; currentAssignmentViewDataCache = {}; currentModalAssignmentIndex = -1; currentModalTechIndex = -1; currentAssignmentId = null; observer = null; mainOverlay = null; originalResultsContainerSource = null; transformationRunning = false; isDraggingOverlay = false; isResizingOverlay = false; overlayDragStartX = 0; overlayDragStartY = 0; overlayOriginalWidth = 0; overlayOriginalHeight = 0; overlayPreMaximizeDimensions = {};
+        constructor() { this._init(); }
+        _init() { console.log(`${this.config.SCRIPT_PREFIX} Initializing...`); this.originalResultsContainerSource = document.getElementById('assignment_list_results'); if (!this.originalResultsContainerSource) { console.log(`${this.config.SCRIPT_PREFIX} Not on a recognized assignments page.`); return; } this._injectStyles(); this._modifyPageSizeSelect(); this._createUI(); this._startObserver(); }
+        _injectStyles() { if (document.getElementById('wmTransformerStyles')) return; const styleElement = document.createElement('style'); styleElement.id = 'wmTransformerStyles'; styleElement.textContent = this.config.CSS; document.head.appendChild(styleElement); }
+        _modifyPageSizeSelect() { const pageSizeSelect = document.getElementById('assignment_list_size'); if (pageSizeSelect && !pageSizeSelect.dataset.modified) { pageSizeSelect.innerHTML = ''; for (let i = 100; i <= 1000; i += 50) { const option = document.createElement('option'); option.value = i; option.textContent = i; pageSizeSelect.appendChild(option); } pageSizeSelect.dataset.modified = 'true'; } }
+        _createUI() { this._createMainOverlay(); this._createShowButton(); }
+        _createMainOverlay() { if (document.getElementById('wmTransformerOverlay')) return; this.mainOverlay = document.createElement('div'); this.mainOverlay.id = 'wmTransformerOverlay'; this.mainOverlay.className = 'wm-transformer-overlay'; this.mainOverlay.innerHTML = `<div class="overlay-header"><span>WorkMarket Enhanced Assignments</span><div class="overlay-controls"><button class="overlay-refresh-btn overlay-icon-btn" title="Refresh Data">🔄</button><button class="copy-json-btn" title="Copy as JSON">JSON</button><button class="copy-csv-btn" title="Copy as CSV">CSV</button><button class="download-csv-btn overlay-icon-btn" title="Download CSV">📥</button><button class="overlay-minimize-btn overlay-icon-btn" title="Minimize">_</button><button class="overlay-maximize-btn overlay-icon-btn" title="Maximize">□</button><button class="overlay-close-btn overlay-icon-btn" title="Hide">X</button></div></div><div class="overlay-content"></div><div class="overlay-resize-handle"></div>`; document.body.appendChild(this.mainOverlay); this.mainOverlay.querySelector('.overlay-header').addEventListener('mousedown', this._startDragOverlay.bind(this)); this.mainOverlay.querySelector('.overlay-resize-handle').addEventListener('mousedown', this._startResizeOverlay.bind(this)); this.mainOverlay.querySelector('.overlay-refresh-btn').addEventListener('click', () => this._runTransformation()); this.mainOverlay.querySelector('.copy-json-btn').addEventListener('click', () => this._copyJsonToClipboard()); this.mainOverlay.querySelector('.copy-csv-btn').addEventListener('click', () => this._copyCsvToClipboard()); this.mainOverlay.querySelector('.download-csv-btn').addEventListener('click', () => this.exportDataToCsv()); this.mainOverlay.querySelector('.overlay-minimize-btn').addEventListener('click', () => this.mainOverlay.classList.toggle('minimized')); this.mainOverlay.querySelector('.overlay-maximize-btn').addEventListener('click', () => this._toggleMaximizeOverlay()); this.mainOverlay.querySelector('.overlay-close-btn').addEventListener('click', () => this.mainOverlay.style.display = 'none'); }
+        _createShowButton() { if (document.getElementById('wm-transformer-view-btn')) return; const targetArea = document.querySelector('.dashboard-quick-actions'); if (!targetArea) return; const showBtn = document.createElement('button'); showBtn.id = 'wm-transformer-view-btn'; showBtn.className = 'button -new tooltipped tooltipped-n'; showBtn.setAttribute('aria-label', 'Show Transformer Table View'); showBtn.innerHTML = `<div class="button--content">T-View</div>`; showBtn.onclick = () => { if(this.mainOverlay) this.mainOverlay.style.display = 'flex'; }; targetArea.prepend(showBtn); }
+        _createTechModal() { if (document.getElementById('techDetailModalOverlay')) return document.getElementById('techDetailModalOverlay'); const overlay = document.createElement('div'); overlay.id = 'techDetailModalOverlay'; overlay.className = 'generic-modal-overlay'; overlay.innerHTML = `<div class="generic-modal-content"><div class="generic-modal-header"><h3>Technician Details</h3><button class="generic-modal-close">×</button></div><div class="generic-modal-body"><div id="techModalDetailsGrid" class="generic-modal-detail-grid"></div></div><div class="generic-modal-footer"><button id="prevTechBtn">« Prev</button><span id="techCounter"></span><button id="nextTechBtn">Next »</button></div></div>`; document.body.appendChild(overlay); overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; }); overlay.querySelector('.generic-modal-close').addEventListener('click', () => overlay.style.display = 'none'); overlay.querySelector('#prevTechBtn').addEventListener('click', () => this._showPrevTech()); overlay.querySelector('#nextTechBtn').addEventListener('click', () => this._showNextTech()); return overlay; }
+        _createAssignmentDetailsModal() { if (document.getElementById('assignmentDetailModalOverlay')) return document.getElementById('assignmentDetailModalOverlay'); const overlay = document.createElement('div'); overlay.id = 'assignmentDetailModalOverlay'; overlay.className = 'generic-modal-overlay'; overlay.innerHTML = `<div class="generic-modal-content"><div class="generic-modal-header"><h3>Assignment Details</h3><button class="generic-modal-close">×</button></div><div class="generic-modal-body"><div id="assignmentModalDetailsGrid" class="generic-modal-detail-grid"></div></div><div class="generic-modal-footer"><button id="prevAssignmentBtn">« Prev</button><span id="assignmentCounter"></span><button id="nextAssignmentBtn">Next »</button></div></div>`; document.body.appendChild(overlay); overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; }); overlay.querySelector('.generic-modal-close').addEventListener('click', () => overlay.style.display = 'none'); overlay.querySelector('#prevAssignmentBtn').addEventListener('click', () => this._showPrevAssignment()); overlay.querySelector('#nextAssignmentBtn').addEventListener('click', () => this._showNextAssignment()); return overlay; }
         _startObserver() { this.observer = new MutationObserver(this._debounce(() => this._runTransformation(), 500)); this.observer.observe(this.originalResultsContainerSource, { childList: true, subtree: true }); this._runTransformation(); }
         async _runTransformation() { if (this.transformationRunning) return; this.transformationRunning = true; console.log(`${this.config.SCRIPT_PREFIX} Starting data transformation...`); const originalNodes = Array.from(this.originalResultsContainerSource.querySelectorAll(this.config.ASSIGNMENT_ITEM_SELECTOR)); if(this.mainOverlay) this.mainOverlay.style.display = 'flex'; this.fullTableData = originalNodes.map(node => ({ title: node.querySelector('div[style="float: left;"] > strong > a .title')?.textContent.trim() || 'Loading...', applicantDetailsDisplay: 'Loading...', appliedCount: '...' })); this._applyFiltersAndRedraw(); this.fullTableData = await this._extractAssignmentsData(originalNodes); this._applyFiltersAndRedraw(); console.log(`${this.config.SCRIPT_PREFIX} Transformation complete.`); this.transformationRunning = false; }
         _applyFiltersAndRedraw() { const filters = {}; document.querySelectorAll('#custom-table-filter-row input').forEach(input => { if (input.value) { filters[input.dataset.filterColumn] = input.value.toLowerCase(); } }); if (Object.keys(filters).length === 0) { this.displayedTableData = [...this.fullTableData]; } else { this.displayedTableData = this.fullTableData.filter(item => { return Object.keys(filters).every(key => { const filterValue = filters[key]; const itemValue = item[key]; if (itemValue === undefined || itemValue === null) return false; if (key === 'parsedDate' && itemValue) return itemValue === filterValue; return String(itemValue).toLowerCase().includes(filterValue); }); }); } this._sortData(); this._renderTable(); }
@@ -225,17 +102,16 @@
         _renderBody(tbody) { if (this.displayedTableData.length === 0) { const row = tbody.insertRow(); const cell = row.insertCell(); cell.colSpan = this.config.TABLE_HEADERS.length; cell.textContent = "No assignments match filters."; cell.style.textAlign = "center"; cell.style.padding = "20px"; return; } this.displayedTableData.forEach((item, index) => { const row = tbody.insertRow(); this.config.TABLE_HEADERS.forEach(h => { const cell = row.insertCell(); this._renderCell(cell, item, h, index); }); }); }
         _renderCell(cell, item, header, itemIndex) { switch (header.key) { case 'checkbox': cell.innerHTML = `<input type="checkbox" value="${item.checkboxValue}" ${item.isChecked ? 'checked' : ''}>`; break; case 'title': cell.innerHTML = `<a href="${item.detailsLink}" target="_blank">${item.title}</a>`; break; case 'descIcon': const icon = document.createElement('span'); icon.innerHTML = header.name; icon.style.cursor = 'pointer'; icon.addEventListener('click', () => this._showAssignmentDetailsModal(itemIndex)); cell.appendChild(icon); break; case 'applicantDetailsDisplay': cell.innerHTML = item.applicantDetailsDisplay || ''; if (cell.innerHTML.includes('Loading')) cell.classList.add('loading-workers'); cell.querySelectorAll('.tech-detail-link').forEach(link => { link.addEventListener('click', e => { e.preventDefault(); this._showTechDetailsModal(this.currentAssignmentTechsData[e.target.dataset.assignmentId]?.[e.target.dataset.techIndex], e.target.dataset.assignmentId, parseInt(e.target.dataset.techIndex, 10)); }); }); break; default: cell.textContent = item[header.key] || ''; break; } }
         async _extractAssignmentsData(assignmentNodes) { if (assignmentNodes.length === 0) return []; const assignmentsPromises = assignmentNodes.map(async (itemNode) => { const data = {}; const getText = (selector) => itemNode.querySelector(selector)?.textContent.trim() || ''; data.checkboxValue = itemNode.querySelector('.results-select input[type="checkbox"]')?.value || ''; const titleLinkEl = itemNode.querySelector('div[style="float: left;"] > strong > a'); data.title = titleLinkEl?.querySelector('.title')?.textContent.trim() || 'N/A'; data.detailsLink = titleLinkEl?.href || '#'; const assignedTechLink = itemNode.querySelector('a[href*="/new-profile/"]'); data.assignedTech = assignedTechLink?.textContent.trim() || ''; let statusText = getText('.status').replace(/\s+/g, ' '); if (statusText.toLowerCase().includes('confirmed') || statusText.toLowerCase().includes('unconfirmed')) { statusText = statusText.split('by')[0].trim() + ' - Assigned'; } data.status = statusText; const dateParts = this._parseFullDateToParts(getText('.date small.meta span')); Object.assign(data, dateParts); const locationParts = this._parseLocationString(getText('.location small.meta').replace(/\s+/g, ' ')); Object.assign(data, locationParts); data.price = getText('.price small.meta'); data.priceNumeric = parseFloat(String(data.price).replace(/[^0-9.-]+/g, "")) || 0; data.siteName = ''; data.graniteTicket = ''; itemNode.querySelectorAll('.work-details > small.meta').forEach(metaEl => { const text = metaEl.textContent.trim(); if (text.startsWith('Location:')) data.siteName = text.substring('Location:'.length).trim(); else if (text.startsWith('Granite Ticket Number:')) data.graniteTicket = text.substring('Granite Ticket Number:'.length).trim(); }); data.labels = Array.from(itemNode.querySelectorAll('.assignment_labels .label')).map(ln => ln.textContent.trim()).join(', '); const assignIdMatch = getText('ul.assignment-actions li.fr em').match(/Assign\. ID: (\d+)/); data.assignmentId = itemNode.querySelector('.assignmentId')?.id || assignIdMatch?.[1] || null; data.appliedCount = '...'; data.applicantDetailsDisplay = 'Loading...'; if (data.assignmentId) { const workerInfo = await this._fetchWorkerData(data.assignmentId, data.assignedTech); data.appliedCount = workerInfo.count; data.applicantDetailsDisplay = workerInfo.applicantDetailsDisplay; this.currentAssignmentTechsData[data.assignmentId] = workerInfo.top10TechsFullData; } else { data.appliedCount = 0; data.applicantDetailsDisplay = 'No ID'; } return data; }); return Promise.all(assignmentsPromises); }
-        async _fetchWorkerData(assignmentId, assignedTechName) { /* ... implementation ... */ return { count: 0, applicantDetailsDisplay: 'No applicants', top10TechsFullData: [] }; }
+        async _fetchWorkerData(assignmentId, assignedTechName) { if (!assignmentId) return { count: 0, applicantDetailsDisplay: 'No ID', top10TechsFullData: [] }; const url = `/assignments/${assignmentId}/workers?start=0&limit=50&sortColumn=NEGOTIATION_CREATED_ON&sortDirection=DESC`; try { const response = await fetch(url, { headers: { 'Accept': 'application/json' } }); if (!response.ok) throw new Error(`API Error: ${response.status}`); const data = await response.json(); const appliedWorkers = (data.results || []).filter(w => w.declined_on === "" && w.has_negotiation === true && w.negotiation !== null); appliedWorkers.sort((a, b) => (a.distance || Infinity) - (b.distance || Infinity)); const top10TechsFullData = appliedWorkers.slice(0, 10).map(w => ({ ...w })); const listItems = top10TechsFullData.map((tech, index) => { let displayName = (tech.company_name && tech.company_name.toLowerCase() === 'sole proprietor') ? (tech.name || tech.company_name) : (tech.company_name || 'N/A'); const distance = (tech.distance !== undefined ? `${parseFloat(tech.distance).toFixed(1)} mi` : 'N/A'); const totalCostValue = tech.negotiation?.pricing?.total_cost; const totalCostDisplay = totalCostValue !== undefined ? `$${parseFloat(totalCostValue).toFixed(2)}` : 'N/A'; let statusLabel = ''; if (assignedTechName) { statusLabel = (tech.name === assignedTechName || tech.company_name === assignedTechName) ? ` <strong>(ASSIGNED)</strong>` : ` (APPLIED)`; } return `<li><span class="tech-detail-link" data-assignment-id="${assignmentId}" data-tech-index="${index}">${displayName}</span> (${distance}, <span class="${totalCostValue ? 'cost-value' : 'cost-na'}">Cost: ${totalCostDisplay}</span>)${statusLabel}</li>`; }); const applicantDetailsDisplay = top10TechsFullData.length > 0 ? `<ul>${listItems.join('')}</ul>` : 'No applicants found'; return { count: appliedWorkers.length, applicantDetailsDisplay, top10TechsFullData }; } catch (error) { console.error(`${this.config.SCRIPT_PREFIX} Error fetching worker data for ${assignmentId}:`, error); return { count: 0, applicantDetailsDisplay: 'Fetch Error', top10TechsFullData: [] }; } }
         _parseFullDateToParts(dateString) { if (!dateString) return { date: '', time: '', timestamp: 0 }; const parts = { date: '', time: '', timestamp: 0 }; const match = dateString.match(/(\w{3})\s(\d{1,2})\s(\d{1,2}:\d{2}\s(?:AM|PM))/); let ts = 0; if (match) { parts.time = match[3]; const year = new Date().getFullYear(); let parsedDate = new Date(`${match[1]} ${match[2]}, ${year} ${match[3]}`); if (new Date().getMonth() >= 10 && parsedDate.getMonth() <= 1 && parsedDate < new Date()) { parsedDate.setFullYear(year + 1); } ts = parsedDate.getTime(); } else { ts = Date.parse(dateString.replace(/\s*(MST|PST|PDT|EST|EDT|CST|CDT|UTC)/, '').trim()); } if (!isNaN(ts) && ts > 0) { parts.timestamp = ts; const d = new Date(ts); parts.date = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); if(!parts.time) { parts.time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } } return parts; }
         _parseLocationString(locationString) { if (!locationString) return { city: '', state: '', zip: '' }; const match = locationString.match(/^(.*?),\s*([A-Za-z]{2})\s*(\S+)/); if (match) return { city: match[1].trim(), state: match[2].trim().toUpperCase(), zip: match[3].trim() }; return { city: locationString, state: '', zip: ''}; }
-        _updateSortIndicators() { const table = document.getElementById('customAssignmentsTable_overlay'); if (!table) return; table.querySelectorAll('thead th .sort-arrow').forEach(arrow => arrow.className = 'sort-arrow'); const activeThArrow = table.querySelector(`thead th[data-column="${this.currentSort.column}"] .sort-arrow`); if (activeThArrow) activeThArrow.classList.add(this.currentSort.direction); }
+        _updateSortIndicators() { const table = this.mainOverlay.querySelector('.custom-sortable-table'); if (!table) return; table.querySelectorAll('thead th .sort-arrow').forEach(arrow => arrow.className = 'sort-arrow'); const activeThArrow = table.querySelector(`thead th[data-column="${this.currentSort.column}"] .sort-arrow`); if (activeThArrow) activeThArrow.classList.add(this.currentSort.direction); }
         _showPrevTech() { if (this.currentModalTechIndex > 0) { this.currentModalTechIndex--; this._showTechDetailsModal(this.currentAssignmentTechsData[this.currentAssignmentId][this.currentModalTechIndex], this.currentAssignmentId, this.currentModalTechIndex); } }
         _showNextTech() { const techs = this.currentAssignmentTechsData[this.currentAssignmentId]; if (techs && this.currentModalTechIndex < techs.length - 1) { this.currentModalTechIndex++; this._showTechDetailsModal(techs[this.currentModalTechIndex], this.currentAssignmentId, this.currentModalTechIndex); } }
         _showPrevAssignment() { if (this.currentModalAssignmentIndex > 0) this._showAssignmentDetailsModal(this.currentModalAssignmentIndex - 1); }
         _showNextAssignment() { if (this.currentModalAssignmentIndex < this.displayedTableData.length - 1) this._showAssignmentDetailsModal(this.currentModalAssignmentIndex + 1); }
         _showTechDetailsModal(techData, assignmentId, techIndex) { if (!techData) return; const modal = this._createTechModal(); this.currentAssignmentId = assignmentId; this.currentModalTechIndex = techIndex; modal.querySelector('#techModalDetailsGrid').innerHTML = `...`; modal.style.display = 'flex'; }
         async _showAssignmentDetailsModal(itemIndex) { this.currentModalAssignmentIndex = itemIndex; const assignment = this.displayedTableData[itemIndex]; if (!assignment) return; const modal = this._createAssignmentDetailsModal(); modal.style.display = 'flex'; const grid = modal.querySelector('#assignmentModalDetailsGrid'); grid.innerHTML = '<em>Loading...</em>'; const details = await this._fetchAssignmentViewDetails(assignment.assignmentId); if (!details) { grid.innerHTML = '<em>Could not fetch details.</em>'; return; } grid.innerHTML = `...`; }
-        exportDataToCsv() { /* ... same as before ... */ }
         _startDragOverlay(e) { if (e.target.closest('.overlay-controls')) return; this.isDraggingOverlay = true; this.overlayDragStartX = e.clientX - this.mainOverlay.offsetLeft; this.overlayDragStartY = e.clientY - this.mainOverlay.offsetTop; document.addEventListener('mousemove', this._boundDoDragOverlay = this._boundDoDragOverlay || this._doDragOverlay.bind(this)); document.addEventListener('mouseup', this._boundStopDragOverlay = this._boundStopDragOverlay || this._stopDragOverlay.bind(this)); }
         _doDragOverlay(e) { if (!this.isDraggingOverlay) return; this.mainOverlay.style.left = (e.clientX - this.overlayDragStartX) + 'px'; this.mainOverlay.style.top = (e.clientY - this.overlayDragStartY) + 'px'; }
         _stopDragOverlay() { this.isDraggingOverlay = false; document.removeEventListener('mousemove', this._boundDoDragOverlay); document.removeEventListener('mouseup', this._boundStopDragOverlay); }
