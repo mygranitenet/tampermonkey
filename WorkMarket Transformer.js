@@ -4,8 +4,8 @@
 // @version      19.2
 // @description  Fetches assignment data directly from the API for a faster, more reliable, and powerful table with advanced filtering.
 // @author       ilakskill
-// @match        https://www.workmarket.com/assignments*
-// @match        https://www.workmarket.com/workorders*
+// @match        https://www.workmarket.com/assignments/*
+// @match        https://www.workmarket.com/workorders/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -122,6 +122,31 @@
         _stopResizeOverlay() { this.isResizingOverlay = false; document.removeEventListener('mousemove', this._boundDoResizeOverlay); document.removeEventListener('mouseup', this._boundStopResizeOverlay); }
         _toggleMaximizeOverlay() { if (this.mainOverlay.classList.toggle('maximized-true')) { this.overlayPreMaximizeDimensions = { width: this.mainOverlay.style.width, height: this.mainOverlay.style.height, top: this.mainOverlay.style.top, left: this.mainOverlay.style.left, }; } else { this.mainOverlay.style.width = this.overlayPreMaximizeDimensions.width; this.mainOverlay.style.height = this.overlayPreMaximizeDimensions.height; this.mainOverlay.style.top = this.overlayPreMaximizeDimensions.top; this.mainOverlay.style.left = this.overlayPreMaximizeDimensions.left; } }
     }
+
+    const originalXhrOpen = XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.addEventListener('load', function() {
+        if (url.includes('assignments/fetch_dashboard_results')) {
+            console.log('[WM TRANSFORMER V19.2] Intercepted XHR response:', this.responseText);
+
+            try {
+    const apiData = JSON.parse(this.responseText);
+    if (window.WorkMarketTransformerInstance && typeof window.WorkMarketTransformerInstance._processApiData === "function") {
+        window.WorkMarketTransformerInstance._processApiData(apiData);
+    } else {
+        console.warn('[WM TRANSFORMER V19.2] Transformer instance or processor not found.');
+    }
+} catch(e) {
+    console.error('[WM TRANSFORMER V19.2] Error parsing XHR response:', e);
+}
+
+            
+            // You can add logic here to process the response like in _processApiData.
+        }
+    });
+    return originalXhrOpen.apply(this, [method, url, ...rest]);
+};
+
 
     if (!window.WorkMarketTransformerInstance) {
         window.WorkMarketTransformerInstance = new WorkMarketTransformer();
