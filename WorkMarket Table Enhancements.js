@@ -24,7 +24,7 @@
     `);
 
     // --- Configuration ---
-    const tableSelector = 'table.datatable-responsive';
+const tableSelector = '#customAssignmentsTable_overlay';
 
     // --- Utility: Convert HTML Table to CSV ---
     function tableToCSV(table) {
