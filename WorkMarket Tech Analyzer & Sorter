@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         WorkMarket Tech Analyzer & Sorter (v4.6 - Prioritize Our Techs)
+// @name         WorkMarket Tech Analyzer & Sorter (v4.7 - Prioritize Quality & Reliability)
 // @namespace    http://tampermonkey.net/
-// @version      4.6
-// @description  Fully automates analysis on the Talent tab. Heavily weights recent experience with your company.
+// @version      4.7
+// @description  Fully automates analysis on the Talent tab. Heavily weights recent experience, but severely penalizes proven unreliability with your company.
 // @author       Your Name
 // @match        https://www.workmarket.com/assignments/details/*
 // @grant        GM_addStyle
@@ -12,33 +12,64 @@
 (function() {
     'use strict';
 
-    console.log('WorkMarket Tech Analyzer v4.6 (Prioritize Our Techs): Script loaded.');
+    console.log('WorkMarket Tech Analyzer v4.6 (Prioritize Quality & Reliability): Script loaded.');
 
     // --- CONFIGURATION ---
-    const SCORING_WEIGHTS = {
-        // --- YOURS 3 MO. STATS (HEAVILY WEIGHTED) ---
-        satisfactionYours3Mo: 600,  // (Satisfaction Rate with You, 3 Mo.) * weight
-        onTimeYours3Mo: 400,        // (On-Time % with You, 3 Mo.) * weight
-        completedWorkYours3Mo: 15,  // ln(Completed Jobs with You, 3 Mo. + 1) * weight
+    const SCORING_CONFIG = {
+        WEIGHTS: {
+            // A small initial bonus just for having worked with you, to ensure they get rated.
+            hasHistoryWithCompanyBonus: 250,
 
-        // --- OTHER STATS (Still important, but less so) ---
-        satisfactionAll: 150,
-        onTimeAll: 100,
-        completedWorkAll: 2,
-        priceIsGood: 50,
-        hasMessage: 20,
+            // YOURS 3 MO. STATS (HEAVILY WEIGHTED - Reward recent success with you)
+            satisfactionYours3Mo: 600,
+            onTimeYours3Mo: 400,
+            completedWorkYours3Mo: 15, // Logarithmic scaling
 
-        // --- PENALTIES ---
-        distance: -1.5,
-        priceOverBudget: -2,
-        cancellationsAll: -20,
-        cancellationsYours: -40,
-        abandonedAll: -60,
-        abandonedYours: -120,
+            // OTHER STATS (Less important than your specific experience)
+            satisfactionAll: 150,
+            onTimeAll: 100,
+            completedWorkAll: 2,
+            hasMessage: 20,
+
+            // TRUST & PROFESSIONALISM BONUSES
+            hasBackgroundCheck: 75,
+            hasInsurance: 50,
+
+            // STANDARD PENALTIES (Per incident)
+            cancellationsAll: -20,
+            cancellationsYours: -40,
+            abandonedAll: -60,
+            abandonedYours: -120, 
+        },
+        // --- RELATIONSHIP HEALTH PENALTIES (The "Human" Logic) ---
+        // These are large, flat penalties applied if a relationship is fundamentally unhealthy.
+        RELATIONSHIP: {
+            // Severe penalty for abandoning a job with your company (Trust Violation)
+            trustViolationPenalty: -1000, 
+
+            // If a tech's total ON-TIME % with YOU is below this threshold (85%)
+            poorOnTimeThresholdPercent: 0.85, 
+            poorOnTimePenalty: -300,
+
+            // If a tech's total CANCELLATIONS with YOU is above this count (3 incidents)
+            excessiveCancellationsThreshold: 3,
+            excessiveCancellationsPenalty: -250,
+        },
+        // --- DYNAMIC SCORING PARAMETERS ---
+        DISTANCE: {
+            penaltyPerMile: -1.5,
+            sweetSpotMiles: 25, // No penalty for techs within this distance
+            maxPenalty: -150,   // Cap the distance penalty
+        },
+        PRICE: {
+            penaltyPerDollarOver: -2,
+            bonusPercentOfSavings: 0.5, // 50 points per $100 saved
+            maxBonus: 75,
+        },
     };
     const INVITED_ONLY_PENALTY = -10000;
 
-    // --- STYLING ---
+    // --- STYLING (Remains the same) ---
     GM_addStyle(`
         #wm-analyzer-status { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 5px; font-size: 16px; margin: 10px 0; text-align: center; transition: background-color 0.5s ease; }
         .profile-card--details { display: flex !important; flex-wrap: wrap; justify-content: space-between; }
@@ -52,6 +83,8 @@
     `);
 
     let analysisHasRun = false;
+
+    // --- MAIN ANALYSIS FUNCTIONS ---
 
     function runAnalysis() {
         if(document.querySelector('#wm-analyzer-status')?.textContent.startsWith('Analyzing')) return;
@@ -95,25 +128,131 @@
         const budget = getBudget();
         let applicants = [];
         let nonApplicants = [];
+        
         workers.forEach(tech => {
             const { score, analysis, isApplicant } = calculateScore(tech, budget);
             if (isApplicant) applicants.push({ ...tech, rawScore: score, analysis });
             else nonApplicants.push({ ...tech, rawScore: INVITED_ONLY_PENALTY, analysis: "Invited Only" });
         });
+
+        // Calculate relative scores based only on applicants' range
         const rawScores = applicants.length > 0 ? applicants.map(t => t.rawScore) : [0];
         const minScore = Math.min(...rawScores);
         const maxScore = Math.max(...rawScores);
         const scoreRange = maxScore > minScore ? maxScore - minScore : 1;
+
         applicants.forEach(tech => {
+            // Normalize score to 0-100 scale
             tech.relativeScore = Math.round(((tech.rawScore - minScore) / scoreRange) * 100);
             displayResults(tech, true);
         });
+
         nonApplicants.forEach(tech => {
-            tech.relativeScore = tech.rawScore;
+            tech.relativeScore = tech.rawScore; // Use raw score to keep invited techs at the bottom
             displayResults(tech, false);
         });
+
         setTimeout(sortWorkerCards, 500);
     }
+
+    function getBudget() {
+        const budgetElement = document.querySelector('#pricing-details strong');
+        try { return parseFloat(budgetElement.textContent.trim().replace(/[^0-9.]/g, '')); } catch (e) { return null; }
+    }
+
+    // --- CORE SCORING LOGIC ---
+    function calculateScore(tech, budget) {
+        const isApplicant = tech.status === 'open' && tech.has_negotiation === true;
+        if (!isApplicant) return { score: 0, analysis: "Invited Only", isApplicant: false };
+
+        let score = 0;
+        let analysis = [];
+        const W = SCORING_CONFIG.WEIGHTS;
+        const R = SCORING_CONFIG.RELATIONSHIP;
+        const allStats = tech.resource_scorecard?.values;
+        const yourStats = tech.resource_scorecard_for_company?.values;
+        const negotiation = tech.negotiation;
+
+        // --- RELATIONSHIP HEALTH CHECK (THE NEW LOGIC) ---
+        const hasHistory = yourStats?.COMPLETED_WORK?.all > 0;
+        if (hasHistory) {
+            score += W.hasHistoryWithCompanyBonus;
+            analysis.push(`🤝 History w/ You: +${W.hasHistoryWithCompanyBonus}`);
+
+            // 1. TRUST VIOLATION: Abandoned jobs for you?
+            if (yourStats?.ABANDONED_WORK?.all > 0) {
+                score += R.trustViolationPenalty;
+                analysis.push(`🚨 TRUST VIOLATION (Abandoned for You): ${R.trustViolationPenalty}`);
+            }
+            
+            // 2. POOR RELIABILITY: Low on-time percentage with you?
+            if (yourStats?.ON_TIME_PERCENTAGE?.all && yourStats.ON_TIME_PERCENTAGE.all < R.poorOnTimeThresholdPercent) {
+                score += R.poorOnTimePenalty;
+                analysis.push(`🚨 POOR ON-TIME % (for You): ${R.poorOnTimePenalty}`);
+            }
+            
+            // 3. EXCESSIVE CANCELLATIONS: Too many cancellations with you?
+            if (yourStats?.CANCELLED_WORK?.all > R.excessiveCancellationsThreshold) {
+                score += R.excessiveCancellationsPenalty;
+                analysis.push(`🚨 EXCESSIVE CANCELLATIONS (for You): ${R.excessiveCancellationsPenalty}`);
+            }
+        }
+
+        // --- YOUR RECENT STATS (PRIMARY) ---
+        if (yourStats?.SATISFACTION_OVER_ALL?.net90) { score += yourStats.SATISFACTION_OVER_ALL.net90 * W.satisfactionYours3Mo; analysis.push(`⭐ Your Sat (3 Mo): +${Math.round(yourStats.SATISFACTION_OVER_ALL.net90 * W.satisfactionYours3Mo)}`); }
+        if (yourStats?.ON_TIME_PERCENTAGE?.net90) { score += yourStats.ON_TIME_PERCENTAGE.net90 * W.onTimeYours3Mo; analysis.push(`⭐ Your On-Time (3 Mo): +${Math.round(yourStats.ON_TIME_PERCENTAGE.net90 * W.onTimeYours3Mo)}`); }
+        if (yourStats?.COMPLETED_WORK?.net90 > 0) { const bonus = Math.log(yourStats.COMPLETED_WORK.net90 + 1) * W.completedWorkYours3Mo; score += bonus; analysis.push(`⭐ Your Jobs (3 Mo. - ${yourStats.COMPLETED_WORK.net90}): +${Math.round(bonus)}`); }
+
+        // --- OVERALL STATS (SECONDARY) ---
+        if (allStats?.SATISFACTION_OVER_ALL?.all) { score += allStats.SATISFACTION_OVER_ALL.all * W.satisfactionAll; analysis.push(`✅ Overall Sat: +${Math.round(allStats.SATISFACTION_OVER_ALL.all * W.satisfactionAll)}`); }
+        if (allStats?.ON_TIME_PERCENTAGE?.all) { score += allStats.ON_TIME_PERCENTAGE.all * W.onTimeAll; analysis.push(`✅ Overall On-Time: +${Math.round(allStats.ON_TIME_PERCENTAGE.all * W.onTimeAll)}`); }
+        if (allStats?.COMPLETED_WORK?.all > 0) { const bonus = Math.log(allStats.COMPLETED_WORK.all + 1) * W.completedWorkAll; score += bonus; analysis.push(`✅ Overall Jobs (${allStats.COMPLETED_WORK.all}): +${Math.round(bonus)}`); }
+
+        // --- TRUST & PROFESSIONALISM ---
+        if(negotiation?.note){ score += W.hasMessage; analysis.push(`✅ Has Message: +${W.hasMessage}`); }
+        if(tech.is_background_checked){ score += W.hasBackgroundCheck; analysis.push(`✅ Background Check: +${W.hasBackgroundCheck}`); }
+        if(tech.has_insurance){ score += W.hasInsurance; analysis.push(`✅ Has Insurance: +${W.hasInsurance}`); }
+
+        // --- STANDARD PENALTIES (Applied per incident count) ---
+        if (allStats?.ABANDONED_WORK?.all > 0) { score += allStats.ABANDONED_WORK.all * W.abandonedAll; analysis.push(`🔻 Overall Abandoned (${allStats.ABANDONED_WORK.all}): ${Math.round(allStats.ABANDONED_WORK.all * W.abandonedAll)}`); }
+        if (yourStats?.ABANDONED_WORK?.all > 0) { score += yourStats.ABANDONED_WORK.all * W.abandonedYours; analysis.push(`🔻 YOUR Abandoned (${yourStats.ABANDONED_WORK.all}): ${Math.round(yourStats.ABANDONED_WORK.all * W.abandonedYours)}`); }
+        if (allStats?.CANCELLED_WORK?.all > 0) { score += allStats.CANCELLED_WORK.all * W.cancellationsAll; analysis.push(`🔻 Overall Canceled (${allStats.CANCELLED_WORK.all}): ${Math.round(allStats.CANCELLED_WORK.all * W.cancellationsAll)}`); }
+        if (yourStats?.CANCELLED_WORK?.all > 0) { score += yourStats.CANCELLED_WORK.all * W.cancellationsYours; analysis.push(`🔻 YOUR Canceled (${yourStats.CANCELLED_WORK.all}): ${Math.round(yourStats.CANCELLED_WORK.all * W.cancellationsYours)}`); }
+
+        // --- DISTANCE PENALTY ---
+        if (tech.distance > SCORING_CONFIG.DISTANCE.sweetSpotMiles) {
+            const milesToPenalize = tech.distance - SCORING_CONFIG.DISTANCE.sweetSpotMiles;
+            const penalty = Math.max(SCORING_CONFIG.DISTANCE.maxPenalty, milesToPenalize * SCORING_CONFIG.DISTANCE.penaltyPerMile);
+            score += penalty;
+            analysis.push(`🔻 Distance (${tech.distance.toFixed(1)} mi): ${Math.round(penalty)}`);
+        } else {
+             analysis.push(`✅ Distance OK (${tech.distance.toFixed(1)} mi)`);
+        }
+
+        // --- PRICE SCORING ---
+        if (negotiation?.is_price_negotiation && budget) {
+            const counterOffer = negotiation.pricing?.spend_limit || 0;
+            analysis.push(`💰 Counter: $${counterOffer.toFixed(2)}`);
+            if (counterOffer > budget) {
+                const overage = counterOffer - budget;
+                const penalty = overage * SCORING_CONFIG.PRICE.penaltyPerDollarOver;
+                score += penalty;
+                analysis.push(`🔻 Price Over ($${overage.toFixed(2)}): ${Math.round(penalty)}`);
+            } else {
+                const savings = budget - counterOffer;
+                const bonus = Math.min(SCORING_CONFIG.PRICE.maxBonus, savings * SCORING_CONFIG.PRICE.bonusPercentOfSavings);
+                score += bonus;
+                analysis.push(`✅ Price OK ($${savings.toFixed(2)} saved): +${Math.round(bonus)}`);
+            }
+        } else {
+            analysis.push('💰 No Counter-offer');
+        }
+
+        return { score: Math.round(score), analysis: analysis.join('\n'), isApplicant: true };
+    }
+
+
+    // --- DISPLAY AND DOM MANIPULATION FUNCTIONS (Remain the same) ---
 
     function displayResults(tech, isApplicant) {
         const selector = `.profile-card--photo[data-usernumber="${tech.user_number}"]`;
@@ -151,50 +290,14 @@
     function sortWorkerCards() {
         const container = document.querySelector('.assignment-workers--feed');
         if (!container) return;
+        // Sorts by score descending. Invited techs (score -10000) naturally fall to the bottom.
         const cards = Array.from(container.querySelectorAll('.profile-card'));
         cards.sort((a, b) => (parseInt(b.dataset.score, 10) || INVITED_ONLY_PENALTY) - (parseInt(a.dataset.score, 10) || INVITED_ONLY_PENALTY));
         cards.forEach(card => container.appendChild(card));
         console.log("WorkMarket Tech Analyzer: SUCCESS - Cards sorted.");
     }
 
-    function getBudget() {
-        const budgetElement = document.querySelector('#pricing-details strong');
-        try { return parseFloat(budgetElement.textContent.trim().replace(/[^0-9.]/g, '')); } catch (e) { return null; }
-    }
-
-    function calculateScore(tech, budget) {
-        const isApplicant = tech.status === 'open' && tech.has_negotiation === true;
-        if (!isApplicant) return { score: 0, analysis: "Invited Only", isApplicant: false };
-
-        let score = 0; let analysis = [];
-        const allStats = tech.resource_scorecard?.values;
-        const yourStats = tech.resource_scorecard_for_company?.values;
-        const negotiation = tech.negotiation;
-
-        // --- NEW: Heavily weighted "Yours, 3 Mo." stats ---
-        if (yourStats?.SATISFACTION_OVER_ALL?.net90) { score += yourStats.SATISFACTION_OVER_ALL.net90 * SCORING_WEIGHTS.satisfactionYours3Mo; analysis.push(`⭐ Your Sat (3 Mo): +${Math.round(yourStats.SATISFACTION_OVER_ALL.net90 * SCORING_WEIGHTS.satisfactionYours3Mo)}`); }
-        if (yourStats?.ON_TIME_PERCENTAGE?.net90) { score += yourStats.ON_TIME_PERCENTAGE.net90 * SCORING_WEIGHTS.onTimeYours3Mo; analysis.push(`⭐ Your On-Time (3 Mo): +${Math.round(yourStats.ON_TIME_PERCENTAGE.net90 * SCORING_WEIGHTS.onTimeYours3Mo)}`); }
-        if (yourStats?.COMPLETED_WORK?.net90 > 0) { score += Math.log(yourStats.COMPLETED_WORK.net90 + 1) * SCORING_WEIGHTS.completedWorkYours3Mo; analysis.push(`⭐ Your Jobs (3 Mo. - ${yourStats.COMPLETED_WORK.net90}): +${Math.round(Math.log(yourStats.COMPLETED_WORK.net90 + 1) * SCORING_WEIGHTS.completedWorkYours3Mo)}`); }
-
-        // --- Other stats ---
-        if (allStats?.SATISFACTION_OVER_ALL?.all) { score += allStats.SATISFACTION_OVER_ALL.all * SCORING_WEIGHTS.satisfactionAll; analysis.push(`✅ Overall Sat: +${Math.round(allStats.SATISFACTION_OVER_ALL.all * SCORING_WEIGHTS.satisfactionAll)}`); }
-        if (allStats?.ON_TIME_PERCENTAGE?.all) { score += allStats.ON_TIME_PERCENTAGE.all * SCORING_WEIGHTS.onTimeAll; analysis.push(`✅ Overall On-Time: +${Math.round(allStats.ON_TIME_PERCENTAGE.all * SCORING_WEIGHTS.onTimeAll)}`); }
-        if (allStats?.COMPLETED_WORK?.all > 0) { score += Math.log(allStats.COMPLETED_WORK.all + 1) * SCORING_WEIGHTS.completedWorkAll; analysis.push(`✅ Overall Jobs (${allStats.COMPLETED_WORK.all}): +${Math.round(Math.log(allStats.COMPLETED_WORK.all + 1) * SCORING_WEIGHTS.completedWorkAll)}`); }
-        if(negotiation?.note){ score += SCORING_WEIGHTS.hasMessage; analysis.push(`✅ Has Message: +${SCORING_WEIGHTS.hasMessage}`); }
-        if (tech.distance > 0) { score += tech.distance * SCORING_WEIGHTS.distance; analysis.push(`🔻 Distance (${tech.distance.toFixed(1)} mi): ${Math.round(tech.distance * SCORING_WEIGHTS.distance)}`); }
-        if (allStats?.ABANDONED_WORK?.all > 0) { score += allStats.ABANDONED_WORK.all * SCORING_WEIGHTS.abandonedAll; analysis.push(`🔻 Overall Abandoned (${allStats.ABANDONED_WORK.all}): ${Math.round(allStats.ABANDONED_WORK.all * SCORING_WEIGHTS.abandonedAll)}`); }
-        if (yourStats?.ABANDONED_WORK?.all > 0) { score += yourStats.ABANDONED_WORK.all * SCORING_WEIGHTS.abandonedYours; analysis.push(`🔻 Your Abandoned (${yourStats.ABANDONED_WORK.all}): ${Math.round(yourStats.ABANDONED_WORK.all * SCORING_WEIGHTS.abandonedYours)}`); }
-        if (allStats?.CANCELLED_WORK?.all > 0) { score += allStats.CANCELLED_WORK.all * SCORING_WEIGHTS.cancellationsAll; analysis.push(`🔻 Overall Canceled (${allStats.CANCELLED_WORK.all}): ${Math.round(allStats.CANCELLED_WORK.all * SCORING_WEIGHTS.cancellationsAll)}`); }
-        if (yourStats?.CANCELLED_WORK?.all > 0) { score += yourStats.CANCELLED_WORK.all * SCORING_WEIGHTS.cancellationsYours; analysis.push(`🔻 Your Canceled (${yourStats.CANCELLED_WORK.all}): ${Math.round(yourStats.CANCELLED_WORK.all * SCORING_WEIGHTS.cancellationsYours)}`); }
-        if (negotiation?.is_price_negotiation && budget) {
-            const counterOffer = negotiation.pricing?.spend_limit || 0;
-            analysis.push(`💰 Counter: $${counterOffer.toFixed(2)}`);
-            if (counterOffer > budget) { const overage = counterOffer - budget; score += overage * SCORING_WEIGHTS.priceOverBudget; analysis.push(`🔻 Price Over ($${overage.toFixed(2)}): ${Math.round(overage * SCORING_WEIGHTS.priceOverBudget)}`);
-            } else { score += SCORING_WEIGHTS.priceIsGood; analysis.push(`✅ Price OK: +${SCORING_WEIGHTS.priceIsGood}`); }
-        } else { analysis.push('💰 No Counter-offer'); }
-
-        return { score: Math.round(score), analysis: analysis.join('\n'), isApplicant: true };
-    }
+    // --- INITIALIZATION AND OBSERVER FUNCTIONS (Remain the same) ---
 
     function initializeAutomation() {
         const workersTabContent = document.querySelector('#workers');
