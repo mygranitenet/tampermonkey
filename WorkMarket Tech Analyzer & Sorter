@@ -1,0 +1,254 @@
+// ==UserScript==
+// @name         WorkMarket Tech Analyzer & Sorter (v4.6 - Prioritize Our Techs)
+// @namespace    http://tampermonkey.net/
+// @version      4.6
+// @description  Fully automates analysis on the Talent tab. Heavily weights recent experience with your company.
+// @author       Your Name
+// @match        https://www.workmarket.com/assignments/details/*
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    console.log('WorkMarket Tech Analyzer v4.6 (Prioritize Our Techs): Script loaded.');
+
+    // --- CONFIGURATION ---
+    const SCORING_WEIGHTS = {
+        // --- YOURS 3 MO. STATS (HEAVILY WEIGHTED) ---
+        satisfactionYours3Mo: 600,  // (Satisfaction Rate with You, 3 Mo.) * weight
+        onTimeYours3Mo: 400,        // (On-Time % with You, 3 Mo.) * weight
+        completedWorkYours3Mo: 15,  // ln(Completed Jobs with You, 3 Mo. + 1) * weight
+
+        // --- OTHER STATS (Still important, but less so) ---
+        satisfactionAll: 150,
+        onTimeAll: 100,
+        completedWorkAll: 2,
+        priceIsGood: 50,
+        hasMessage: 20,
+
+        // --- PENALTIES ---
+        distance: -1.5,
+        priceOverBudget: -2,
+        cancellationsAll: -20,
+        cancellationsYours: -40,
+        abandonedAll: -60,
+        abandonedYours: -120,
+    };
+    const INVITED_ONLY_PENALTY = -10000;
+
+    // --- STYLING ---
+    GM_addStyle(`
+        #wm-analyzer-status { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 5px; font-size: 16px; margin: 10px 0; text-align: center; transition: background-color 0.5s ease; }
+        .profile-card--details { display: flex !important; flex-wrap: wrap; justify-content: space-between; }
+        .score-card.profile-card--score-card { flex: 1 1 300px; min-width: 280px; }
+        .wm-analyzer-box { flex: 1 1 300px; min-width: 280px; border: 2px solid #007bff; border-radius: 8px; padding: 10px; margin: 10px; background-color: #f0f8ff; }
+        .wm-analyzer-box.invited-card { border-color: #6c757d; background-color: #f8f9fa; }
+        .wm-analyzer-box h3 { margin-top: 0; margin-bottom: 10px; font-size: 16px; border-bottom: 1px solid #ccc; padding-bottom: 5px; color: #0056b3; }
+        .wm-analyzer-box.invited-card h3 { color: #5a6268; }
+        .wm-analyzer-box .score { font-weight: bold; font-size: 22px; padding: 5px 12px; border-radius: 5px; color: white; display: inline-block; margin-bottom: 10px; }
+        .wm-analyzer-box .details pre { margin: 4px 0; white-space: pre-wrap; font-family: inherit; font-size: 13px; }
+    `);
+
+    let analysisHasRun = false;
+
+    function runAnalysis() {
+        if(document.querySelector('#wm-analyzer-status')?.textContent.startsWith('Analyzing')) return;
+        const statusDiv = document.getElementById('wm-analyzer-status');
+        statusDiv.textContent = 'Fetching worker data...';
+        statusDiv.style.backgroundColor = '#ffc107';
+
+        const match = window.location.pathname.match(/\/assignments\/(?:details\/)?(\d+)/);
+        if (!match) { statusDiv.textContent = 'Error: No ID Found'; return; }
+        const assignmentId = match[1];
+        const apiUrl = `/assignments/${assignmentId}/workers?start=0&limit=1000&sortColumn=NEGOTIATION_CREATED_ON&sortDirection=DESC`;
+
+        GM_xmlhttpRequest({
+            method: "GET", url: `https://www.workmarket.com${apiUrl}`,
+            headers: { "Accept": "application/json" },
+            onload: function(response) {
+                try {
+                    const data = JSON.parse(response.responseText);
+                    if (data && data.results) {
+                        statusDiv.textContent = `Analyzing ${data.results.length} workers...`;
+                        processAndDisplayData(data.results);
+                        statusDiv.textContent = 'Analysis Complete!';
+                        statusDiv.style.backgroundColor = '#28a745';
+                    } else { throw new Error('API data invalid.'); }
+                } catch (e) {
+                    console.error('WorkMarket Analyzer Error:', e);
+                    statusDiv.textContent = 'Error: Could not parse worker data.';
+                    statusDiv.style.backgroundColor = '#dc3545';
+                }
+            },
+            onerror: function(response) {
+                console.error('WorkMarket Analyzer Error:', response);
+                statusDiv.textContent = 'Error: API Request Failed.';
+                statusDiv.style.backgroundColor = '#dc3545';
+            }
+        });
+    }
+
+    function processAndDisplayData(workers) {
+        document.querySelectorAll('.wm-analyzer-box').forEach(box => box.remove());
+        const budget = getBudget();
+        let applicants = [];
+        let nonApplicants = [];
+        workers.forEach(tech => {
+            const { score, analysis, isApplicant } = calculateScore(tech, budget);
+            if (isApplicant) applicants.push({ ...tech, rawScore: score, analysis });
+            else nonApplicants.push({ ...tech, rawScore: INVITED_ONLY_PENALTY, analysis: "Invited Only" });
+        });
+        const rawScores = applicants.length > 0 ? applicants.map(t => t.rawScore) : [0];
+        const minScore = Math.min(...rawScores);
+        const maxScore = Math.max(...rawScores);
+        const scoreRange = maxScore > minScore ? maxScore - minScore : 1;
+        applicants.forEach(tech => {
+            tech.relativeScore = Math.round(((tech.rawScore - minScore) / scoreRange) * 100);
+            displayResults(tech, true);
+        });
+        nonApplicants.forEach(tech => {
+            tech.relativeScore = tech.rawScore;
+            displayResults(tech, false);
+        });
+        setTimeout(sortWorkerCards, 500);
+    }
+
+    function displayResults(tech, isApplicant) {
+        const selector = `.profile-card--photo[data-usernumber="${tech.user_number}"]`;
+        const photoDiv = document.querySelector(selector);
+        if (!photoDiv) return;
+        const workerCard = photoDiv.closest('.profile-card');
+        if (!workerCard) return;
+        const detailsContainer = workerCard.querySelector('.profile-card--details');
+        if (!detailsContainer) return;
+        workerCard.dataset.score = tech.relativeScore;
+        const scoreBox = createAnalysisBox(tech, isApplicant);
+        detailsContainer.appendChild(scoreBox);
+    }
+
+    function createAnalysisBox(tech, isApplicant) {
+        const { relativeScore, rawScore, analysis, negotiation } = tech;
+        const scoreBox = document.createElement('div');
+        scoreBox.className = isApplicant ? 'wm-analyzer-box applied-card' : 'wm-analyzer-box invited-card';
+        let scoreColor = isApplicant ? (relativeScore > 80 ? '#28a745' : relativeScore > 40 ? '#ffc107' : '#dc3545') : '#6c757d';
+        let html = `<h3>Analyzer Score</h3><div class="score" style="background-color: ${scoreColor};">${relativeScore}</div>`;
+        if (isApplicant) {
+            html += `<div class="details"><strong>Breakdown (Raw: ${rawScore}):</strong><pre>${analysis}</pre></div>`;
+            if (negotiation?.note) {
+                const noteText = document.createElement('div');
+                noteText.textContent = negotiation.note;
+                html += `<div class="message"><strong>Message:</strong> ${noteText.innerHTML.replace(/\n/g, '<br>')}</div>`;
+            }
+        } else {
+             html += `<div class="details" style="padding-top: 50px;"><p>Invited only. Not ranked.</p></div>`;
+        }
+        scoreBox.innerHTML = html;
+        return scoreBox;
+    }
+
+    function sortWorkerCards() {
+        const container = document.querySelector('.assignment-workers--feed');
+        if (!container) return;
+        const cards = Array.from(container.querySelectorAll('.profile-card'));
+        cards.sort((a, b) => (parseInt(b.dataset.score, 10) || INVITED_ONLY_PENALTY) - (parseInt(a.dataset.score, 10) || INVITED_ONLY_PENALTY));
+        cards.forEach(card => container.appendChild(card));
+        console.log("WorkMarket Tech Analyzer: SUCCESS - Cards sorted.");
+    }
+
+    function getBudget() {
+        const budgetElement = document.querySelector('#pricing-details strong');
+        try { return parseFloat(budgetElement.textContent.trim().replace(/[^0-9.]/g, '')); } catch (e) { return null; }
+    }
+
+    function calculateScore(tech, budget) {
+        const isApplicant = tech.status === 'open' && tech.has_negotiation === true;
+        if (!isApplicant) return { score: 0, analysis: "Invited Only", isApplicant: false };
+
+        let score = 0; let analysis = [];
+        const allStats = tech.resource_scorecard?.values;
+        const yourStats = tech.resource_scorecard_for_company?.values;
+        const negotiation = tech.negotiation;
+
+        // --- NEW: Heavily weighted "Yours, 3 Mo." stats ---
+        if (yourStats?.SATISFACTION_OVER_ALL?.net90) { score += yourStats.SATISFACTION_OVER_ALL.net90 * SCORING_WEIGHTS.satisfactionYours3Mo; analysis.push(`⭐ Your Sat (3 Mo): +${Math.round(yourStats.SATISFACTION_OVER_ALL.net90 * SCORING_WEIGHTS.satisfactionYours3Mo)}`); }
+        if (yourStats?.ON_TIME_PERCENTAGE?.net90) { score += yourStats.ON_TIME_PERCENTAGE.net90 * SCORING_WEIGHTS.onTimeYours3Mo; analysis.push(`⭐ Your On-Time (3 Mo): +${Math.round(yourStats.ON_TIME_PERCENTAGE.net90 * SCORING_WEIGHTS.onTimeYours3Mo)}`); }
+        if (yourStats?.COMPLETED_WORK?.net90 > 0) { score += Math.log(yourStats.COMPLETED_WORK.net90 + 1) * SCORING_WEIGHTS.completedWorkYours3Mo; analysis.push(`⭐ Your Jobs (3 Mo. - ${yourStats.COMPLETED_WORK.net90}): +${Math.round(Math.log(yourStats.COMPLETED_WORK.net90 + 1) * SCORING_WEIGHTS.completedWorkYours3Mo)}`); }
+
+        // --- Other stats ---
+        if (allStats?.SATISFACTION_OVER_ALL?.all) { score += allStats.SATISFACTION_OVER_ALL.all * SCORING_WEIGHTS.satisfactionAll; analysis.push(`✅ Overall Sat: +${Math.round(allStats.SATISFACTION_OVER_ALL.all * SCORING_WEIGHTS.satisfactionAll)}`); }
+        if (allStats?.ON_TIME_PERCENTAGE?.all) { score += allStats.ON_TIME_PERCENTAGE.all * SCORING_WEIGHTS.onTimeAll; analysis.push(`✅ Overall On-Time: +${Math.round(allStats.ON_TIME_PERCENTAGE.all * SCORING_WEIGHTS.onTimeAll)}`); }
+        if (allStats?.COMPLETED_WORK?.all > 0) { score += Math.log(allStats.COMPLETED_WORK.all + 1) * SCORING_WEIGHTS.completedWorkAll; analysis.push(`✅ Overall Jobs (${allStats.COMPLETED_WORK.all}): +${Math.round(Math.log(allStats.COMPLETED_WORK.all + 1) * SCORING_WEIGHTS.completedWorkAll)}`); }
+        if(negotiation?.note){ score += SCORING_WEIGHTS.hasMessage; analysis.push(`✅ Has Message: +${SCORING_WEIGHTS.hasMessage}`); }
+        if (tech.distance > 0) { score += tech.distance * SCORING_WEIGHTS.distance; analysis.push(`🔻 Distance (${tech.distance.toFixed(1)} mi): ${Math.round(tech.distance * SCORING_WEIGHTS.distance)}`); }
+        if (allStats?.ABANDONED_WORK?.all > 0) { score += allStats.ABANDONED_WORK.all * SCORING_WEIGHTS.abandonedAll; analysis.push(`🔻 Overall Abandoned (${allStats.ABANDONED_WORK.all}): ${Math.round(allStats.ABANDONED_WORK.all * SCORING_WEIGHTS.abandonedAll)}`); }
+        if (yourStats?.ABANDONED_WORK?.all > 0) { score += yourStats.ABANDONED_WORK.all * SCORING_WEIGHTS.abandonedYours; analysis.push(`🔻 Your Abandoned (${yourStats.ABANDONED_WORK.all}): ${Math.round(yourStats.ABANDONED_WORK.all * SCORING_WEIGHTS.abandonedYours)}`); }
+        if (allStats?.CANCELLED_WORK?.all > 0) { score += allStats.CANCELLED_WORK.all * SCORING_WEIGHTS.cancellationsAll; analysis.push(`🔻 Overall Canceled (${allStats.CANCELLED_WORK.all}): ${Math.round(allStats.CANCELLED_WORK.all * SCORING_WEIGHTS.cancellationsAll)}`); }
+        if (yourStats?.CANCELLED_WORK?.all > 0) { score += yourStats.CANCELLED_WORK.all * SCORING_WEIGHTS.cancellationsYours; analysis.push(`🔻 Your Canceled (${yourStats.CANCELLED_WORK.all}): ${Math.round(yourStats.CANCELLED_WORK.all * SCORING_WEIGHTS.cancellationsYours)}`); }
+        if (negotiation?.is_price_negotiation && budget) {
+            const counterOffer = negotiation.pricing?.spend_limit || 0;
+            analysis.push(`💰 Counter: $${counterOffer.toFixed(2)}`);
+            if (counterOffer > budget) { const overage = counterOffer - budget; score += overage * SCORING_WEIGHTS.priceOverBudget; analysis.push(`🔻 Price Over ($${overage.toFixed(2)}): ${Math.round(overage * SCORING_WEIGHTS.priceOverBudget)}`);
+            } else { score += SCORING_WEIGHTS.priceIsGood; analysis.push(`✅ Price OK: +${SCORING_WEIGHTS.priceIsGood}`); }
+        } else { analysis.push('💰 No Counter-offer'); }
+
+        return { score: Math.round(score), analysis: analysis.join('\n'), isApplicant: true };
+    }
+
+    function initializeAutomation() {
+        const workersTabContent = document.querySelector('#workers');
+        if (!workersTabContent || document.querySelector('#wm-analyzer-status')) return;
+        const statusDiv = document.createElement('div');
+        statusDiv.id = 'wm-analyzer-status';
+        statusDiv.textContent = 'Analyzer Ready';
+        const toolbar = workersTabContent.querySelector('.assignment-workers--toolbar');
+        if (toolbar) toolbar.parentNode.insertBefore(statusDiv, toolbar); else workersTabContent.prepend(statusDiv);
+        const pageSizeDropdown = workersTabContent.querySelector('.assignment-workers--page-size .selectize-input');
+        if (pageSizeDropdown) {
+            statusDiv.textContent = 'Setting to "Show All"...';
+            pageSizeDropdown.click();
+            setTimeout(() => {
+                const showAllOption = document.querySelector('.selectize-dropdown-content .option[data-value="1000"]');
+                if (showAllOption) { showAllOption.click(); waitForListToReloadAndRun(); }
+                else { runAnalysis(); }
+            }, 200);
+        } else { runAnalysis(); }
+    }
+
+    function waitForListToReloadAndRun() {
+        const feed = document.querySelector('.assignment-workers--feed');
+        if (!feed) return;
+        document.getElementById('wm-analyzer-status').textContent = 'Loading all workers...';
+        const listObserver = new MutationObserver((mutationsList, obs) => {
+            for (const mutation of mutationsList) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0 && feed.querySelector('.profile-card')) {
+                    obs.disconnect();
+                    runAnalysis();
+                    return;
+                }
+            }
+        });
+        listObserver.observe(feed, { childList: true, subtree: true });
+    }
+
+    const pageObserver = new MutationObserver(() => {
+        if (document.querySelector('#workers.wm-tab--content.-active') && !analysisHasRun) {
+            analysisHasRun = true;
+            initializeAutomation();
+        } else if (!document.querySelector('#workers.wm-tab--content.-active') && analysisHasRun) {
+            analysisHasRun = false;
+            const statusDiv = document.querySelector('#wm-analyzer-status');
+            if (statusDiv) statusDiv.remove();
+        }
+    });
+
+    const targetNode = document.querySelector('.content .wm-tabs');
+    if (targetNode) {
+        pageObserver.observe(targetNode, { attributes: true, subtree: true, attributeFilter: ['class'] });
+        if (document.querySelector('#workers.wm-tab--content.-active')) {
+            analysisHasRun = true;
+            initializeAutomation();
+        }
+    }
+})();
