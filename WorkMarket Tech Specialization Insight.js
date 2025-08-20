@@ -11,7 +11,7 @@
 (function () {
     'use strict';
 
-    const GEMINI_API_KEY = 'AIzaSyByqKL0p4UYoO8S73KXgRGrZxVJGivJ5ZM'; // Replace with your Gemini API key
+    const GEMINI_API_KEY = ''; // Replace with your Gemini API key
 
     async function analyzeTechSpecialization() {
         const profile = document.querySelector('.profile-card--avatar[data-number]');
