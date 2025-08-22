@@ -1,0 +1,177 @@
+// ==UserScript==
+// @name         Granite Ticket Search Interactive Popup (Edit, Back, Move, Close)
+// @namespace    http://tampermonkey.net/
+// @version      5.3-debug
+// @description  DEBUG VERSION: This version uses alerts to diagnose the save issue.
+// @author       ilakskills
+// @match        *://*/*
+// @connect      api.smartsheet.com
+// @grant        GM_xmlhttpRequest
+// @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    let gtsConfirmMenuOpen = false;
+    let gtsViewStack = [];
+    let gtsCurrentRowData = null;
+
+    const SMARTSHEET_API_BASE_URL = 'https://api.smartsheet.com/2.0';
+    let SMARTSHEET_API_KEY = '';
+
+    // CSS (unchanged)
+    GM_addStyle(`
+#gts-popup {
+  position: fixed !important; z-index: 999999 !important; top: 50% !important; left: 50% !important;
+  transform: translate(-50%, -50%) !important; background: #fff !important; box-shadow: 0 4px 24px rgba(0,0,0,0.18) !important;
+  border-radius: 12px !important; min-width: 450px !important; max-width: 90vw !important; font-family: system-ui,sans-serif !important;
+  border: 1px solid #dee2e6 !important; display: block !important;
+}
+
+
+#gts-popup[hidden] { display: none !important; }
+#gts-popup-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; border-radius: 12px 12px 0 0; cursor: move; }
+#gts-popup-title { font-size: 16px; font-weight: 600;}
+#gts-popup-header-buttons { display: flex; gap: 8px;}
+#gts-popup-content { padding: 18px 20px; max-height: 60vh; overflow-y: auto; }
+/* Add this new rule to your GM_addStyle block */
+#gts-popup-content {
+    padding: 18px 20px;
+    max-height: 60vh;
+    overflow-y: auto;
+    user-select: text; /* This is the important line! */
+}
+.gts-details-table { width: 100%; margin-top: 10px; border-collapse: collapse;}
+.gts-details-table th, .gts-details-table td { padding: 8px; border-bottom: 1px solid #eee; text-align: left; vertical-align: top;}
+.gts-details-table th { width: 30%; font-weight: 600; }
+.gts-section { margin-top: 25px; border-top: 1px solid #eee; padding-top: 20px;}
+.gts-comment { margin-bottom: 10px; }
+.gts-comment-header { font-size: 13px; color: #555; margin-bottom: 2px;}
+.gts-spinner { border: 4px solid #f3f3f3; border-top: 4px solid #0d6efd; border-radius: 50%; width: 32px; height: 32px; animation: spin 1s linear infinite; margin: 20px auto; display: block;}
+@keyframes spin { 0%{transform:rotate(0deg);} 100%{transform:rotate(360deg);} }
+.gts-error { color: #842029; background: #f8d7da; border: 1px solid #f5c2c7; border-radius: 8px; padding: 10px; margin-bottom: 15px; }
+.gts-raw-response { white-space: pre-wrap; word-break: break-all; background-color: #e9ecef; padding: 8px; border-radius: 4px; font-size: 12px;}
+.gts-list { list-style: none; padding: 0; margin: 0; }
+.gts-list li { padding: 8px 0; }
+#gts-popup-close, #gts-popup-apikey, #gts-popup-back { background: none; border: none; font-size: 22px; cursor: pointer; color: #6c757d; line-height: 1;}
+#gts-popup-close:hover, #gts-popup-apikey:hover, #gts-popup-back:hover { color: #212529; }
+#gts-popup-close:focus, #gts-popup-apikey:focus, #gts-popup-back:focus { outline: 2px solid #0d6efd;}
+#gts-confirm-menu { animation: fadeIn 0.1s; }
+@keyframes fadeIn { from {opacity:0;} to {opacity:1;} }
+.gts-action-bar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 15px; }
+.gts-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background-color: #f8f9fa; cursor: pointer; font-size: 14px; }
+.gts-btn-primary { background-color: #0d6efd; color: white; border-color: #0d6efd; }
+.gts-edit-cell { width: 98%; padding: 6px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+`);
+
+    // All other functions are unchanged...
+    function sanitize(str) { const div = document.createElement('div'); div.textContent = str == null ? '' : str; return div.innerHTML; }
+    function linkify(text) { if (text == null) return ''; const urlRegex = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig; return String(text).replace(urlRegex, url => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`); }
+    function showSpinner() { renderView('Loading...', '<div class="gts-spinner" aria-label="Loading"></div>', true, false); }
+    function createPopup() { let popup = document.getElementById('gts-popup'); if (popup) { popup.hidden = false; if (popup.style.transform.includes('translate')) { popup.style.top = "50%"; popup.style.left = "50%"; popup.style.transform = "translate(-50%, -50%)"; } return; } popup = document.createElement('div'); popup.id = 'gts-popup'; popup.setAttribute("role", "dialog"); popup.setAttribute("aria-modal", "true"); popup.innerHTML = `<div id="gts-popup-header"><span id="gts-popup-title" aria-live="polite"></span><div id="gts-popup-header-buttons"><button id="gts-popup-back" title="Back" style="display:none;">←</button><button id="gts-popup-apikey" title="Manage API Key">🔑</button><button id="gts-popup-close" title="Close" aria-label="Close popup">×</button></div></div><div id="gts-popup-content"></div>`; document.body.appendChild(popup); document.getElementById('gts-popup-close').onclick = closePopup; document.getElementById('gts-popup-apikey').onclick = manageApiKey; document.getElementById('gts-popup-back').onclick = goBack; makeDraggable(popup, document.getElementById('gts-popup-header')); }
+    function renderView(title, html, show = true, pushToStack = true) { createPopup(); const popupTitle = document.getElementById('gts-popup-title'); const popupContent = document.getElementById('gts-popup-content'); if (pushToStack) { let prev = { title: popupTitle.textContent, html: popupContent.innerHTML }; const lastView = gtsViewStack[gtsViewStack.length - 1]; if (!lastView || lastView.html !== prev.html) { gtsViewStack.push(prev); } } popupTitle.textContent = title; popupContent.innerHTML = html; document.getElementById('gts-popup').hidden = !show; document.getElementById('gts-popup-back').style.display = gtsViewStack.length > 0 ? '' : 'none'; }
+    function goBack() { if (gtsViewStack.length > 0) { gtsCurrentRowData = null; let prev = gtsViewStack.pop(); renderView(prev.title, prev.html, true, false); } }
+    function closePopup() { let popup = document.getElementById('gts-popup'); if (popup) popup.hidden = true; gtsViewStack = []; gtsCurrentRowData = null; }
+    function makeDraggable(element, handle) { let isDragging = false, offsetX, offsetY; handle.onmousedown = function (e) { if (e.target.tagName === 'BUTTON') return; isDragging = true; let rect = element.getBoundingClientRect(); offsetX = e.clientX - rect.left; offsetY = e.clientY - rect.top;  }; document.onmousemove = function (e) { if (isDragging) { element.style.left = e.clientX - offsetX + "px"; element.style.top = e.clientY - offsetY + "px"; element.style.transform = "none"; } }; document.onmouseup = function () { isDragging = false; document.body.style.userSelect = ""; }; }
+    async function getApiKey() { if (!SMARTSHEET_API_KEY) { SMARTSHEET_API_KEY = await GM_getValue('SMARTSHEET_API_KEY', ''); } return SMARTSHEET_API_KEY; }
+    async function manageApiKey() { const current = await getApiKey(); const input = prompt('Enter your Smartsheet API Key (leave blank to clear):', current); if (input === null) return; const trimmedInput = input.trim(); if (trimmedInput) { if (!/^[a-zA-Z0-9-_]{20,}$/.test(trimmedInput)) { alert('Invalid API key format. Please check the key and try again.'); return; } await GM_setValue('SMARTSHEET_API_KEY', trimmedInput); SMARTSHEET_API_KEY = trimmedInput; alert('API key saved!'); } else { await GM_setValue('SMARTSHEET_API_KEY', ''); SMARTSHEET_API_KEY = ''; alert('API key cleared.'); } }
+    function buildApiUrl(objectType, parentObjectId, objectId) { const t = (objectType || '').toUpperCase(); if (t === 'ROW') { return `${SMARTSHEET_API_BASE_URL}/sheets/${parentObjectId}/rows/${objectId}?include=discussions,attachments,columns`; } else if (t === 'DISCUSSION') { return `${SMARTSHEET_API_BASE_URL}/sheets/${parentObjectId}/discussions/${objectId}?include=comments`; } return null; }
+    function apiRequest({ url, method = 'GET', data = null, onSuccess, onError }) { const options = { method, url, headers: { 'Authorization': `Bearer ${SMARTSHEET_API_KEY}`, 'Content-Type': 'application/json' }, onload: function (response) { if (response.status >= 200 && response.status < 300) { try { const responseData = response.responseText.trim() ? JSON.parse(response.responseText) : {}; onSuccess(responseData); } catch (e) { onError('Parsing Error', `Could not parse the response. ${e.message}`, response.responseText); } } else { let details = `Server responded with status ${response.status}.`; try { const errorData = JSON.parse(response.responseText); if (errorData.message) { details = `${errorData.message} (Code: ${errorData.errorCode})`; } } catch (e) { /* use default message */ } onError('API Error', sanitize(details), response.responseText); } }, onerror: function (response) { onError('Network Error', `Could not connect to API. Details: ${response.statusText}`); } }; if (data) { options.data = JSON.stringify(data); } GM_xmlhttpRequest(options); }
+    function renderRowDetailsView(rowData, isEditMode = false) {
+        gtsCurrentRowData = rowData;
+        const columnMap = rowData.columns.reduce((map, col) => ({ ...map, [col.id]: col }), {});
+        let content = '';
+        if (isEditMode) {
+            content += `<div class="gts-action-bar"><button id="gts-save-row" class="gts-btn gts-btn-primary">Save Changes</button><button id="gts-cancel-edit" class="gts-btn">Cancel</button></div>`;
+            content += '<h4>Editing Row</h4><table class="gts-details-table">';
+            content += rowData.cells.filter(cell => columnMap[cell.columnId]).map(cell => {
+                const column = columnMap[cell.columnId];
+                const value = sanitize(cell.value === undefined || cell.value === null ? '' : cell.value);
+                return `<tr><th>${sanitize(column.title)}</th><td><input type="text" class="gts-edit-cell" data-column-id="${column.id}" value="${value}"/></td></tr>`;
+            }).join('');
+        } else {
+            content += `<div class="gts-action-bar"><button id="gts-edit-row" class="gts-btn">Edit Row</button></div>`;
+            content += '<h4>Row Details</h4><table class="gts-details-table">';
+            content += rowData.cells.filter(cell => columnMap[cell.columnId] && cell.displayValue).map(cell => `<tr><th>${sanitize(columnMap[cell.columnId].title)}</th><td>${linkify(sanitize(cell.displayValue))}</td></tr>`).join('');
+        }
+        content += '</table>';
+        renderView(`Row in ${sanitize(rowData.sheetName)}`, content, true, false);
+        if (isEditMode) {
+            document.getElementById('gts-save-row').onclick = handleSaveChanges;
+            document.getElementById('gts-cancel-edit').onclick = () => renderRowDetailsView(gtsCurrentRowData, false);
+        } else {
+            document.getElementById('gts-edit-row').onclick = () => renderRowDetailsView(gtsCurrentRowData, true);
+        }
+    }
+
+    /**
+     * DEBUG VERSION of handleSaveChanges.
+     * This function uses alerts to show the exact values being compared.
+     */
+    function handleSaveChanges() {
+        if (!gtsCurrentRowData) return;
+
+        let hasChanges = false;
+
+        const originalCellMap = gtsCurrentRowData.cells.reduce((map, cell) => {
+            map[cell.columnId] = cell;
+            return map;
+        }, {});
+
+        const columnTitleMap = gtsCurrentRowData.columns.reduce((map, col) => {
+            map[col.id] = col.title;
+            return map;
+        }, {});
+
+        // Use a standard for-loop to allow breaking out of the alerts.
+        const inputs = document.querySelectorAll('.gts-edit-cell');
+        for (const input of inputs) {
+            const columnId = input.dataset.columnId;
+            const columnName = columnTitleMap[columnId] || 'Unknown Column';
+            const originalCell = originalCellMap[columnId];
+            const newValue = input.value;
+            const originalValue = (originalCell && originalCell.value !== undefined && originalCell.value !== null) ? originalCell.value : "";
+
+            // Show the debug alert for EVERY cell.
+            const debugMessage = `
+-- DEBUGGING CELL --
+
+Column: ${columnName}
+
+Original Value: [${originalValue}]
+New Value: [${newValue}]
+            `;
+            alert(debugMessage);
+
+            // The actual comparison logic.
+            if (String(originalValue).trim() !== newValue.trim()) {
+                hasChanges = true;
+            }
+        }
+
+        // After showing all alerts, give a final status.
+        if (hasChanges) {
+            alert("SUCCESS: A change was detected! The script would now attempt to save. (Save functionality is disabled in this debug version).");
+            // In a real version, the save logic would go here.
+            renderRowDetailsView(gtsCurrentRowData, false); // Revert to view mode for now.
+        } else {
+            alert("FAILURE: No changes were detected after checking all cells.");
+            renderRowDetailsView(gtsCurrentRowData, false);
+        }
+    }
+
+    // All other functions are unchanged...
+    function renderDiscussionDetailsView(discussionData) { let content = `<h4 style="margin-top:0;">Discussion: ${sanitize(discussionData.title)}</h4>` + (discussionData.comments && discussionData.comments.length > 0 ? discussionData.comments.map(comment => `<div class="gts-comment"><div class="gts-comment-header"><strong>${sanitize(comment.createdBy.name)}</strong> on ${new Date(comment.createdAt).toLocaleString()}</div><div>${linkify(sanitize(comment.text))}</div></div>`).join('') : '<div class="gts-message">No comments in this discussion.</div>'); renderView(`Discussion in ${sanitize(discussionData.parentName)}`, content, true, true); }
+    function buildResultLabel(item) { let label = sanitize(item.text || ""); if (item.objectType === "row") { if (item.contextData && item.contextData[0] && !/^\d+$/.test(item.contextData[0].trim()) && item.contextData[0].trim() !== (item.text || "").trim()) { label += ` — <small>${sanitize(item.contextData[0])}</small>`; } } return label; }
+    function renderSearchResultsView(results) { if (!results.length) { renderView('No Results', '<div class="gts-message">No results found for your query.</div>', true, true); return; } let html = `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:1em;"><thead><tr style="background:#f8f9fa;"><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #ddd;">Result</th><th style="text-align:left; padding:6px 8px; border-bottom:1px solid #ddd;">Location</th><th style="padding:6px 8px; border-bottom:1px solid #ddd;">Actions</th></tr></thead><tbody>`; results.forEach((item, i) => { if (item.objectType !== 'row' && item.objectType !== 'discussion') return; html += `<tr><td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; vertical-align:top;">${buildResultLabel(item)} (${item.objectType})</td><td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; vertical-align:top; white-space:nowrap;">${sanitize(item.parentObjectName || 'N/A')}</td><td style="padding:6px 8px; border-bottom:1px solid #f0f0f0; vertical-align:top; text-align:center;"><button data-index="${i}" class="gts-details-btn gts-btn">Details</button></td></tr>`; }); html += '</tbody></table></div>'; renderView('Search Results', html, true, true); document.querySelectorAll('.gts-details-btn').forEach(btn => { btn.onclick = function () { const idx = parseInt(this.getAttribute('data-index'), 10); getObjectDetails(results[idx]); }; }); }
+    function getObjectDetails(r) { const objectType = r.objectType || r.type; const objectId = r.objectId || r.id; const parentObjectId = r.parentObjectId || r.sheetId || r.parentId; if (!objectType || !objectId || !parentObjectId) { renderView('Error', `<div class="gts-error">Missing required data to fetch details.</div>`, true, true); return; } showSpinner(); const url = buildApiUrl(objectType, parentObjectId, objectId); if (!url) { renderView('Unsupported Type', `<div class="gts-error">Cannot get details for object type: <b>${sanitize(objectType)}</b></div>`, true, true); return; } apiRequest({ url, onSuccess: (data) => { data.sheetName = r.parentObjectName || data.sheetName; data.parentName = r.parentObjectName || data.parentName; if (objectType.toUpperCase() === 'ROW') { renderRowDetailsView(data); } else if (objectType.toUpperCase() === 'DISCUSSION') { renderDiscussionDetailsView(data); } else { renderView('Unsupported Type', `<div class="gts-error">Cannot render details for object type: <b>${sanitize(objectType)}</b></div>`, true, true); } }, onError: (title, message, raw = '') => { renderView(title, `<div class="gts-error">${message}${raw ? `<br><br><pre class="gts-raw-response">${sanitize(raw)}</pre>` : ''}</div>`, true, true); } }); }
+    function searchSmartsheet(q) { showSpinner(); const url = `${SMARTSHEET_API_BASE_URL}/search?query=${encodeURIComponent(q)}`; apiRequest({ url, onSuccess: (data) => { renderSearchResultsView(data.results || []); }, onError: (title, message) => { renderView(title, `<div class="gts-error">${message}</div>`, true, true); } }); }
+    function getSelectionRect() { const selection = window.getSelection(); if (!selection || selection.rangeCount === 0) return null; const range = selection.getRangeAt(0).cloneRange(); if (range.collapsed) return null; return range.getBoundingClientRect(); }
+    function showConfirmSearchMenu(searchText, onConfirm) { if (gtsConfirmMenuOpen) return; const gtsPopup = document.getElementById('gts-popup'); const selection = window.getSelection(); if (gtsPopup && !gtsPopup.hidden && gtsPopup.contains(selection.anchorNode)) { return; } gtsConfirmMenuOpen = true; const existing = document.getElementById('gts-confirm-menu'); if (existing) existing.remove(); const rect = getSelectionRect(); if (!rect) { gtsConfirmMenuOpen = false; return; } const menu = document.createElement('div'); menu.id = 'gts-confirm-menu'; menu.style.cssText = `position: fixed; left: ${rect.left + window.scrollX}px; top: ${rect.bottom + window.scrollY + 8}px; background: #343a40; color: white; border-radius: 8px; padding: 8px 12px; box-shadow: 0 3px 12px rgba(0,0,0,0.25); z-index: 2147483647; font-family: system-ui, sans-serif; font-size: 14px; display: flex; align-items: center; gap: 10px; animation: fadeIn 0.1s ease-out;`; menu.innerHTML = `<span>Search for: <b>${sanitize(searchText)}</b></span><button id="gts-confirm-search" style="margin-left:8px; background:#0d6efd; color:white; border:none; border-radius:4px; padding: 4px 8px; cursor:pointer;">Search</button>`; document.body.appendChild(menu); let closed = false; function cleanup() { if (closed) return; closed = true; if (menu.parentNode) menu.remove(); gtsConfirmMenuOpen = false; window.getSelection().removeAllRanges(); } menu.querySelector('#gts-confirm-search').onclick = (evt) => { evt.stopPropagation(); onConfirm(); cleanup(); }; const clickOutsideHandler = (event) => { if (!menu.contains(event.target)) { cleanup(); document.removeEventListener('mousedown', clickOutsideHandler, true); } }; setTimeout(() => document.addEventListener('mousedown', clickOutsideHandler, true), 0); }
+    document.addEventListener('mouseup', async function (e) { if (e.target.closest('#gts-popup')) return; const sel = window.getSelection().toString().trim(); if (sel.length > 2 && sel.length < 100) { showConfirmSearchMenu(sel, async () => { if (!await getApiKey()) { await manageApiKey(); } if (await getApiKey()) { searchSmartsheet(sel); } }); } });
+    document.addEventListener('keydown', e => { const popup = document.getElementById('gts-popup'); if (!popup || popup.hidden) return; if (e.key === 'Escape') { closePopup(); } });
+
+})();
