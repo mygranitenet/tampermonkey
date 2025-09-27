@@ -1,387 +1,602 @@
 // ==UserScript==
-// @name         OpenPhone AI Summarizer (with Export & Time Frame)
-// @namespace    https://openphone.com/
-// @version      1.1.0
-// @description  Summarize OpenPhone conversations with AI, now with export to ZIP and time frame selection
-// @match        https://my.openphone.com/*
-// @icon         https://www.google.com/s2/favicons?domain=openphone.com
-// @grant        none
-// @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+// @name         OpenPhone AI Summarizer (Exact Preview Models)
+// @namespace    https://github.com/ilakskills/
+// @version      69.0
+// @description  Summarize threads with a user-selected Gemini 2.5 model (stable or preview). Uses v1beta everywhere and validates model access. Adds message-hover button.
+// @author       ilakskills
+// @match        https://my.openphone.com/inbox/*
+// @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
 // ==/UserScript==
 
-(function() {
-    'use strict';
+(function () {
+  'use strict';
 
-    // Utility: Determine current conversation ID from the URL (or page context)
-    function getCurrentConversationId() {
-        // Attempt to parse conversation ID from URL (assuming URL contains "conversation/<id>")
-        const hash = window.location.hash || window.location.pathname;
-        let match = hash.match(/conversation[s]?\/([^\/]+)/);
-        return match ? match[1] : null;
-    }
+  // =============================================================================
+  // CONFIG & CONSTANTS
+  // =============================================================================
+  const GEMINI_KEY_NAME = 'gemini_api_key_storage_tm';
+  const AUTH_COOKIE_NAME = 'openphone_auth_token';
+  const API_VERSION = 'v1beta'; // single source of truth
 
-    // Utility: Calculate start/end timestamps for the given time frame selection
-    function getTimeFrameBounds(frame) {
-        const now = new Date();
-        let start = null, end = null;
-        switch(frame) {
-            case 'today':
-                // start of today (midnight)
-                start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-                end = now;  // end is now (implicitly include everything up to current time)
-                break;
-            case 'yesterday':
-                // yesterday: from yesterday 00:00 to today 00:00
-                start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-                end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-                break;
-            case 'thisWeek':
-                // this week: from Monday of current week to now
-                const dayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, ... 6 = Saturday
-                const mondayOffset = (dayOfWeek === 0 ? 6 : dayOfWeek - 1);  // how many days to subtract to get Monday
-                start = new Date(now);
-                start.setHours(0, 0, 0, 0);
-                start.setDate(now.getDate() - mondayOffset);
-                end = now;
-                break;
-            case 'lastWeek':
-                // last week: from Monday of last week to Monday of this week
-                const day = now.getDay();
-                const offset = (day === 0 ? 6 : day - 1);
-                const mondayThisWeek = new Date(now);
-                mondayThisWeek.setHours(0, 0, 0, 0);
-                mondayThisWeek.setDate(now.getDate() - offset);
-                end = new Date(mondayThisWeek);             // end at start of this week
-                start = new Date(mondayThisWeek);
-                start.setDate(start.getDate() - 7);         // start at one week before this week
-                break;
-            case 'all':
-            default:
-                // No filtering
-                start = null;
-                end = null;
-                break;
-        }
-        return { start, end };
-    }
+  // Valid as of Sep 2025 per Google docs.
+  // Includes a preview option; will auto-fallback if your key lacks access.
+  const MODELS = [
+    { id: 'gemini-2.5-pro',   family: 'gemini', displayName: 'Gemini 2.5 Pro',   description: 'Best reasoning & long context.' },
+    { id: 'gemini-2.5-flash', family: 'gemini', displayName: 'Gemini 2.5 Flash (Default)', description: 'Great price/perf; thinking-capable.' },
+    { id: 'gemini-2.5-flash-preview-09-2025', family: 'gemini', displayName: 'Gemini 2.5 Flash (Preview Sep 2025)', description: 'Latest preview; may require allowlist.' },
+    { id: 'gemini-2.5-flash-lite', family: 'gemini', displayName: 'Gemini 2.5 Flash-Lite', description: 'Fastest & cheapest.' },
+  ];
+  const DEFAULT_MODEL_ID = 'gemini-2.5-flash';
 
-    // Utility: Gather all summary sections text from the output container (for full export)
-    function getAllSectionsText(containerElem) {
-        let textContent = "";
-        // Loop through child nodes to preserve structure and headers
-        containerElem.childNodes.forEach(node => {
-            if (node.nodeType === Node.ELEMENT_NODE) {
-                const tag = node.tagName.toLowerCase();
-                if (tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4' || tag === 'h5' || tag === 'h6') {
-                    // Headings: include text with a colon
-                    textContent += node.innerText.trim() + ":\n";
-                } else {
-                    // Other element (paragraph, div, etc): append its text
-                    textContent += node.innerText.trim() + "\n";
-                }
-            } else if (node.nodeType === Node.TEXT_NODE) {
-                // Plain text node (unlikely outside of elements, but just in case)
-                const txt = node.textContent.trim();
-                if (txt) textContent += txt + "\n";
-            }
-        });
-        return textContent.trim();
-    }
+  const PROMPT_SECTIONS = {
+    title: `Title:\nDescribe the main meeting purpose or project discussed. Use details from any provided images to be more specific (e.g., "Network Rack Installation", "Server Troubleshooting Session").`,
+    attendees: `Attendees:\nList names, inferred roles, and companies. Use phone numbers if names are unavailable.`,
+    project_topic: `Project/Topic:\nClearly state the main project or work order. Include relevant IDs (WO#, Ticket#) and describe equipment seen in images.`,
+    discussion_points: `Content/Key Discussion Points:\nBulleted list summarizing the core conversation. Synthesize related points.`,
+    decisions: `Decisions Made:\nBulleted list of explicit agreements or conclusions reached.`,
+    action_items: `Follow-Up Tasks / Action Items:\nClear, actionable bullet points, assigned to a person/role with deadlines if mentioned.`,
+    notes: `Notes/Observations (Optional):\nInclude observations about tone, potential risks, or unresolved questions.`,
+    quick_summary: `Quick Summary: Sum it all up into 2 or 3 easy to understand sentences.`,
+    quick_next_steps: `Quick Next Steps: Outline next steps in 2 or 3 easy to understand sentences.`,
+    disclaimer: `Disclaimer:\n"Generated by AI. Please review for accuracy."`
+  };
 
-    // Main: Insert a "Summarize" button into the OpenPhone UI if not already present
-    function insertSummarizeButton() {
-        // For example, append to conversation header or toolbar
-        const convoHeader = document.querySelector('[class*="ConversationHeader"], [class*="conversation-header"]');  // try to find conversation header element
-        if (convoHeader && !document.getElementById('openphone-summarize-btn')) {
-            const btn = document.createElement('button');
-            btn.id = 'openphone-summarize-btn';
-            btn.textContent = 'Summarize';
-            btn.style.marginLeft = '8px';
-            // Minimal styling to match UI (you can adjust as needed)
-            btn.style.cursor = 'pointer';
-            convoHeader.appendChild(btn);
+  const BASE_PROMPT_HEADER =
+`Goal:
+Transform a potentially messy conversation log (texts, voicemails, calls) into a clean, structured project summary that is immediately actionable.
+Rules:
+- Be concise. Prefer bullets. Use clear labels.
+- Infer reasonable details (roles, companies) but avoid fabrications.
+- If images are provided, incorporate their descriptions.
+- Pull out IDs (Ticket/WO) and any dates/times.
+- Keep Quick Summary and Quick Next Steps short—2–3 sentences each.
+- The output format should follow the requested sections exactly.
+- Maintain a neutral, professional tone.
+`;
 
-            // On click, open the summarizer modal for the current conversation
-            btn.addEventListener('click', () => {
-                const convId = getCurrentConversationId();
-                if (!convId) {
-                    alert("Unable to determine conversation ID.");
-                    return;
-                }
-                openSummarizerModal(convId);
-            });
-        }
-    }
+  const IMAGE_ANALYSIS_PROMPT =
+`You are an expert at analyzing technical images from the field. For EACH of the following image(s), provide a detailed, one-sentence 'description'.
+Your entire response MUST be ONLY a valid JSON object with an "image_details" array, with no other text before or after it.
 
-    // Function: Open the summarizer modal UI
-    function openSummarizerModal(conversationId) {
-        // Create overlay background
-        const overlay = document.createElement('div');
-        overlay.id = 'summarizerOverlay';
-        overlay.style.position = 'fixed';
-        overlay.style.top = '0';
-        overlay.style.left = '0';
-        overlay.style.width = '100%';
-        overlay.style.height = '100%';
-        overlay.style.background = 'rgba(0,0,0,0.5)';
-        overlay.style.zIndex = '10000';
-        document.body.appendChild(overlay);
+Example JSON format for 2 images:
+{
+  "image_details": [
+    { "description": "A technician is holding a newly installed network switch in a server rack." },
+    { "description": "A close-up of a network cable being plugged into a patch panel." }
+  ]
+}`;
 
-        // Create modal container
-        const modal = document.createElement('div');
-        modal.id = 'summarizerModal';
-        modal.style.position = 'fixed';
-        modal.style.top = '50%';
-        modal.style.left = '50%';
-        modal.style.transform = 'translate(-50%, -50%)';
-        modal.style.maxWidth = '600px';
-        modal.style.width = '90%';
-        modal.style.background = '#fff';
-        modal.style.border = '1px solid #888';
-        modal.style.borderRadius = '4px';
-        modal.style.padding = '16px';
-        modal.style.zIndex = '10001';
-        modal.style.boxShadow = '0 2px 10px rgba(0,0,0,0.3)';
-        document.body.appendChild(modal);
+  const ICONS = {
+    sparkle: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2.5a.75.75 0 0 1 .75.75V5a.75.75 0 0 1-1.5 0V3.25A.75.75 0 0 1 12 2.5zm0 14a.75.75 0 0 1 .75.75v1.75a.75.75 0 0 1-1.5 0V17.5a.75.75 0 0 1 .75-.75zM6.22 5.47a.75.75 0 0 1 1.06 0l1.25 1.25a.75.75 0 0 1-1.06 1.06L6.22 6.53a.75.75 0 0 1 0-1.06zm8.94 8.94a.75.75 0 0 1 1.06 0l1.25 1.25a.75.75 0 0 1-1.06 1.06l-1.25-1.25a.75.75 0 0 1 0-1.06zM2.5 11.25a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5a.75.75 0 0 1 .75-.75zm18.5.75a.75.75 0 0 0 1.5 0v-1.5a.75.75 0 0 0-1.5 0v1.5zM6.22 15.22a.75.75 0 0 1 0-1.06l1.25-1.25a.75.75 0 0 1 1.06 1.06l-1.25 1.25a.75.75 0 0 1-1.06 0zM15.22 6.22a.75.75 0 0 1 0-1.06l1.25-1.25a.75.75 0 1 1 1.06 1.06l-1.25 1.25a.75.75 0 0 1-1.06 0z"/></svg>`,
+    settings: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><path fill="currentColor" d="M10.667 1.875A.833.833 0 0 0 10 1.25a.833.833 0 0 0-.667.625l-.234.937a5.218 5.218 0 0 0-1.593.84l-.87-.39a.833.833 0 0 0-.933.277L4.29 5.293a.833.833 0 0 0 .278.933l.794.516a5.233 5.233 0 0 0 0 1.916l-.794.516a.833.833 0 0 0-.278.933l1.414 1.414a.833.833 0 0 0 .933.278l.87-.39c.47.318.99.577 1.592.839l.234.937A.833.833 0 0 0 10 18.75a.833.833 0 0 0 .667-.625l-.234-.937c.603-.262 1.122-.521 1.593-.84l.87.39a.833.833 0 0 0 .933-.277l1.414-1.414a.833.833 0 0 0-.278-.933l-.794-.516a5.233 5.233 0 0 0 0-1.916l.794-.516a.833.833 0 0 0 .278-.933L15.707 3.88a.833.833 0 0 0-.933-.278l-.87.39a5.218 5.218 0 0 0-1.592-.84l-.234-.937zM10 12.5a2.5 2.5 0 1 1 0-5a2.5 2.5 0 0 1 0 5z"/></svg>`,
+    send: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><path fill="currentColor" d="M2.525 2.525a.75.75 0 0 1 .91-.073l13.5 6.75a.75.75 0 0 1 0 1.196l-13.5 6.75a.75.75 0 0 1-1.002-1.123L3.89 10 2.433 3.571a.75.75 0 0 1 .092-1.046z"/></svg>`,
+  };
 
-        // Modal inner HTML structure
-        modal.innerHTML = `
-            <h2 style="margin-top: 0;">Conversation Summary</h2>
-            <!-- Time Frame selector + Generate button -->
-            <div style="margin-bottom: 8px;">
-                <label for="timeFrameSelect" style="font-weight: 500; margin-right:4px;">Time Frame:</label>
-                <select id="timeFrameSelect" style="padding: 2px 4px; margin-right: 8px;">
-                    <option value="all" selected>All</option>
-                    <option value="today">Today</option>
-                    <option value="yesterday">Yesterday</option>
-                    <option value="thisWeek">This Week</option>
-                    <option value="lastWeek">Last Week</option>
-                </select>
-                <button id="generateSummaryBtn" style="padding: 4px 8px;">Generate Summary</button>
-            </div>
-            <!-- Summary output area -->
-            <div id="summaryOutput" style="white-space: pre-line; overflow-y: auto; max-height: 300px; border: 1px solid #ddd; padding: 8px; margin-bottom: 8px;"></div>
-            <!-- Export controls (hidden until summary generated) -->
-            <div id="exportControls" style="display: none; margin-bottom: 8px;">
-                <label for="exportSelect" style="font-weight: 500; margin-right:4px;">Export:</label>
-                <select id="exportSelect" style="padding: 2px 4px; margin-right: 8px;">
-                    <option value="full" selected>All Sections</option>
-                    <option value="quick">Quick Summary only</option>
-                </select>
-                <button id="downloadZipBtn" style="padding: 4px 8px;">Download ZIP</button>
-            </div>
-            <button id="closeSummaryBtn" style="padding: 4px 8px; float: right;">Close</button>
-        `;
-
-        // Event: Close modal when "Close" button or overlay is clicked
-        const closeBtn = document.getElementById('closeSummaryBtn');
-        closeBtn.addEventListener('click', closeModal);
-        overlay.addEventListener('click', closeModal);
-        function closeModal() {
-            document.body.removeChild(modal);
-            document.body.removeChild(overlay);
-        }
-
-        // Event: Generate summary when "Generate Summary" button is clicked
-        const generateBtn = document.getElementById('generateSummaryBtn');
-        generateBtn.addEventListener('click', async () => {
-            generateBtn.disabled = true;
-            document.getElementById('summaryOutput').innerText = "Generating summary...";  // simple loading state
-            try {
-                await generateSummary(conversationId);
-            } finally {
-                generateBtn.disabled = false;
-            }
-        });
-
-        // Event: Download ZIP when "Download ZIP" button is clicked
-        document.getElementById('downloadZipBtn').addEventListener('click', downloadSummaryZip);
-    }
-
-    // Function: Fetch conversation data, filter by time frame, call AI to summarize, and display results
-    async function generateSummary(conversationId) {
-        const outputDiv = document.getElementById('summaryOutput');
-        const frame = document.getElementById('timeFrameSelect').value;
-        const { start, end } = getTimeFrameBounds(frame);
-        let conversationData = [];
-
-        try {
-            // Fetch conversation activity (messages, calls, etc.) via OpenPhone API
-            const resp = await fetch(`/v2/activity?id=${conversationId}`);
-            if (!resp.ok) throw new Error(`API request failed with status ${resp.status}`);
-            const data = await resp.json();
-            conversationData = Array.isArray(data) ? data : data.data || [];
-
-            // Apply time frame filtering if needed
-            if (start || end) {
-                conversationData = conversationData.filter(item => {
-                    if (!item.createdAt) return false;
-                    const itemTime = new Date(item.createdAt);
-                    if (start && itemTime < start) return false;
-                    if (end && itemTime >= end) return false;
-                    return true;
-                });
-            }
-        } catch (err) {
-            console.error("Error fetching conversation data:", err);
-            outputDiv.innerText = "❌ Failed to retrieve conversation data.";
-            return;
-        }
-
-        // Call AI summarization (this function would use an AI API or OpenPhone's AI to summarize the data)
-        let summaryResult;
-        try {
-            summaryResult = await summarizeConversation(conversationData);  // Placeholder for actual AI call
-        } catch (err) {
-            console.error("AI summarization error:", err);
-            outputDiv.innerText = "❌ Failed to generate summary.";
-            return;
-        }
-
-        // Display the summary result in the modal
-        outputDiv.innerHTML = "";  // clear previous content
-        window._lastSummaryTitle = "";  // reset last title
-
-        if (summaryResult) {
-            // If the result is structured (object with sections) vs plain text
-            if (typeof summaryResult === 'object') {
-                // If an AI title is provided, we store it for file naming (not necessarily displayed)
-                if (summaryResult.title) {
-                    window._lastSummaryTitle = summaryResult.title;
-                    // Optionally, display the title in the modal (for context)
-                    // outputDiv.innerHTML += `<h3>${summaryResult.title}</h3>`;
-                }
-                // Append Quick Summary section if present
-                if (summaryResult.quickSummary) {
-                    const sec = document.createElement('div');
-                    const h = document.createElement('h3');
-                    h.innerText = "Quick Summary";
-                    const p = document.createElement('p');
-                    p.innerText = summaryResult.quickSummary;
-                    sec.appendChild(h);
-                    sec.appendChild(p);
-                    outputDiv.appendChild(sec);
-                }
-                // Append other sections if present (e.g., detailed summary, action items)
-                if (summaryResult.detailedSummary) {
-                    const sec = document.createElement('div');
-                    const h = document.createElement('h3');
-                    h.innerText = "Detailed Summary";
-                    const p = document.createElement('p');
-                    p.innerText = summaryResult.detailedSummary;
-                    sec.appendChild(h);
-                    sec.appendChild(p);
-                    outputDiv.appendChild(sec);
-                }
-                if (summaryResult.actionItems) {
-                    const sec = document.createElement('div');
-                    const h = document.createElement('h3');
-                    h.innerText = "Action Items";
-                    const p = document.createElement('p');
-                    p.innerText = summaryResult.actionItems;
-                    sec.appendChild(h);
-                    sec.appendChild(p);
-                    outputDiv.appendChild(sec);
-                }
-                // (Add handling for any other sections the AI might return)
-            } else {
-                // summaryResult is plain text (string)
-                outputDiv.innerText = summaryResult;
-            }
-        } else {
-            outputDiv.innerText = "(No summary available.)";
-        }
-
-        // Show the export controls now that summary is ready
-        document.getElementById('exportControls').style.display = 'block';
-    }
-
-    // Function: Download the summary as a ZIP file (called on "Download ZIP" button click)
-    function downloadSummaryZip() {
-        const outputDiv = document.getElementById('summaryOutput');
-        if (!outputDiv || outputDiv.innerText.trim() === "") {
-            alert("No summary available to export.");
-            return;
-        }
-        const exportOption = document.getElementById('exportSelect').value;
-        let textContent = "";
-
-        if (exportOption === 'quick') {
-            // Quick Summary only: find the first section that is Quick Summary
-            const quickSectionHeader = outputDiv.querySelector('h3');
-            if (quickSectionHeader && quickSectionHeader.innerText.includes("Quick Summary")) {
-                // Get the text of the quick summary section
-                let qsText = "";
-                // If the structure is a <div> containing h3 + p, we can get the parent div's text
-                const sectionDiv = quickSectionHeader.parentElement;
-                qsText = sectionDiv ? sectionDiv.innerText : quickSectionHeader.innerText;
-                // Remove the heading from the text (to avoid duplicating heading line if innerText includes it)
-                qsText = qsText.replace(/^Quick Summary\s*/i, "").trim();
-                textContent = "Quick Summary:\n" + qsText;
-            } else {
-                // Fallback: no explicit section, use entire text (assuming it's already just one summary)
-                textContent = outputDiv.innerText;
-            }
-        } else {
-            // Full export: all sections
-            textContent = getAllSectionsText(outputDiv);
-        }
-
-        // Prepare the ZIP with the text file
-        const zip = new JSZip();
-        // Determine base filename (use AI title if available, else default)
-        let baseName = "conversation-summary";
-        if (window._lastSummaryTitle && window._lastSummaryTitle.trim() !== "") {
-            // Sanitize title for filesystem (replace forbidden chars with underscores)
-            baseName = window._lastSummaryTitle.trim().replace(/[\/\\|:*?"<>]/g, "_");
-        }
-        const now = new Date();
-        const hh = String(now.getHours()).padStart(2, '0');
-        const mm = String(now.getMinutes()).padStart(2, '0');
-        const ss = String(now.getSeconds()).padStart(2, '0');
-        const SSS = String(now.getMilliseconds()).padStart(3, '0');
-        const timestamp = `${hh}-${mm}-${ss}-${SSS}`;
-        const zipFilename = `${baseName}-${timestamp}.zip`;
-        const txtFilename = `${baseName}.txt`;
-
-        zip.file(txtFilename, textContent);
-        // Generate the ZIP blob and trigger download
-        zip.generateAsync({ type: "blob" }).then(blob => {
-            const url = URL.createObjectURL(blob);
-            const dlAnchor = document.createElement('a');
-            dlAnchor.href = url;
-            dlAnchor.download = zipFilename;
-            document.body.appendChild(dlAnchor);
-            dlAnchor.click();
-            document.body.removeChild(dlAnchor);
-            URL.revokeObjectURL(url);
-        }).catch(err => {
-            console.error("ZIP generation failed:", err);
-        });
-    }
-
-    // Placeholder: the actual AI summarization function (to be implemented or integrated)
-    // This should take the filtered conversation data and return either a string or an object with summary sections.
-    async function summarizeConversation(convoData) {
-        // For demonstration, we assume there's an AI endpoint or service we can call.
-        // In practice, you would implement the API call to OpenAI or OpenPhone's AI here.
-        // This dummy implementation just returns a stubbed summary.
-        if (!convoData || convoData.length === 0) {
-            return "(No data to summarize)";
-        }
-        // TODO: replace with real AI call. For now, return dummy structured summary:
-        return {
-            title: "Sample Conversation Summary",
-            quickSummary: "This is a quick summary of the conversation.",
-            detailedSummary: "This is a more detailed summary of the conversation, covering main points and context.",
-            actionItems: "Action Item 1: ...\nAction Item 2: ...",
-        };
-    }
-
-    // Initialize: insert the Summarize button when applicable
-    // We use a MutationObserver or interval to ensure we add the button when the conversation UI is present.
-    const observer = new MutationObserver(() => {
-        insertSummarizeButton();
+  // =============================================================================
+  // HELPER FUNCTIONS
+  // =============================================================================
+  function gmFetch(url, options = {}) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: options.method || 'GET',
+        url,
+        headers: options.headers,
+        data: options.body,
+        responseType: options.responseType,
+        onload: (res) => {
+          const response = {
+            ok: res.status >= 200 && res.status < 300,
+            status: res.status,
+            statusText: res.statusText,
+            url: res.finalUrl,
+            headers: res.responseHeaders,
+            json: async () => JSON.parse(res.responseText),
+            text: async () => res.responseText,
+            blob: async () => res.response,
+          };
+          resolve(response);
+        },
+        onerror: () => reject(new Error('GM_xmlhttpRequest network error')),
+        ontimeout: () => reject(new Error('GM_xmlhttpRequest timeout')),
+      });
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  const markdownToHtml = (text) => {
+    let html = (text ?? '')
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    html = html
+      .replace(/^### (.*$)/gim, "<h3>$1</h3>")
+      .replace(/^## (.*$)/gim, "<h2>$1</h2>")
+      .replace(/^# (.*$)/gim, "<h1>$1</h1>")
+      .replace(/\*\*(.*?)\*\*|__(.*?)__/g, "<strong>$1$2</strong>")
+      .replace(/\*(.*?)\*|_(.*?)_/g, "<em>$1$2</em>")
+      .replace(/^\s*[-*] (.*)$/gim, "<ul><li>$1</li></ul>")
+      .replace(/<\/ul>\s*<ul>/g, "");
+    return html.replace(/\n/g, "<br>");
+  };
+
+  // =============================================================================
+  // AUTH HANDLING
+  // =============================================================================
+  const getCookie = (name) => {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+  };
+  const setCookie = (name, value, days = 7) => {
+    let expires = "";
+    if (days) {
+      const date = new Date();
+      date.setTime(date.getTime() + (days * 86400000));
+      expires = "; expires=" + date.toUTCString();
+    }
+    document.cookie = `${name}=${value || ""}${expires}; path=/`;
+  };
+
+  const getAuthToken = () => new Promise((resolve, reject) => {
+    const cookieToken = getCookie(AUTH_COOKIE_NAME);
+    if (cookieToken) return resolve(cookieToken);
+
+    let capturedToken = null;
+    const originalFetch = window.fetch;
+    const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    const cleanup = () => {
+      window.fetch = originalFetch;
+      XMLHttpRequest.prototype.setRequestHeader = originalSetRequestHeader;
+    };
+
+    window.fetch = function (...args) {
+      const headers = args[1]?.headers;
+      const maybe = headers && (headers.Authorization || headers.authorization);
+      if (maybe) capturedToken = maybe;
+      return originalFetch.apply(this, args);
+    };
+    XMLHttpRequest.prototype.setRequestHeader = function (header, value) {
+      if (header && header.toLowerCase() === 'authorization') capturedToken = value;
+      return originalSetRequestHeader.apply(this, arguments);
+    };
+
+    let attempts = 0;
+    const interval = setInterval(() => {
+      if (capturedToken) {
+        clearInterval(interval);
+        cleanup();
+        setCookie(AUTH_COOKIE_NAME, capturedToken);
+        resolve(capturedToken);
+      } else if (attempts++ > 60) {
+        clearInterval(interval);
+        cleanup();
+        reject(new Error("Auth token capture timed out. Toggle a message’s read state to trigger a request, then try again."));
+      }
+    }, 250);
+  });
+
+  // =============================================================================
+  // UI
+  // =============================================================================
+  const injectStyles = () => {
+    GM_addStyle(`
+.ai-summarizer-root .modal-overlay{position:fixed!important;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:999998!important;display:flex;align-items:center;justify-content:center;user-select:text;-webkit-user-select:text}
+.ai-summarizer-root .modal-content{background:#fff;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.25);width:90%;max-width:800px;max-height:90vh;display:flex;flex-direction:column}
+.ai-summarizer-root .modal-header{padding:16px;border-bottom:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center}
+.ai-summarizer-root .modal-header h2{margin:0;font-size:18px;color:#333}
+.ai-summarizer-root .modal-close{font-size:24px;font-weight:700;cursor:pointer;color:#888;border:none;background:0 0}
+.ai-summarizer-root .modal-body{padding:16px;overflow-y:auto;font-family:sans-serif;flex-grow:1;line-height:1.5;white-space:normal;background-color:#fff}
+.ai-summarizer-root .modal-footer{padding:12px 16px;border-top:1px solid #e0e0e0;display:flex;gap:10px;justify-content:flex-end}
+.ai-summarizer-root .modal-button{padding:8px 16px;border-radius:6px;border:1px solid #ccc;background:#f0f0f0;cursor:pointer;font-weight:500}
+.ai-summarizer-root .modal-button:hover{background:#e0e0e0}
+.ai-summarizer-root .modal-button.primary{background:#007bff;color:#fff;border-color:#007bff}
+.ai-summarizer-root .modal-button.primary:hover{background:#0056b3}
+.ai-summarizer-root .toast{position:fixed!important;top:20px;right:20px;background:#333;color:#fff;padding:12px 20px;border-radius:6px;z-index:1000000!important;font-size:14px;transition:opacity .5s;opacity:1}
+.ai-summarizer-root .toast.error{background-color:#d9534f}
+.ai-summarizer-root .settings-section{margin-bottom:20px}
+.ai-summarizer-root .settings-section h3{margin:0 0 10px;border-bottom:1px solid #eee;padding-bottom:5px}
+.ai-summarizer-root .settings-section label{display:block;margin-bottom:5px;font-weight:700}
+.ai-summarizer-root .settings-section input[type=text],.ai-summarizer-root .settings-section textarea{width:100%;padding:8px;box-sizing:border-box;border:1px solid #ccc;border-radius:4px;font-family:sans-serif}
+.ai-summarizer-root .model-selection-grid,.ai-summarizer-root .sections-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.ai-summarizer-root .model-desc{font-size:12px;color:#666;padding-left:25px;margin-top:-5px}
+.ai-summarizer-root .chat-log{display:flex;flex-direction:column;gap:12px}
+.ai-summarizer-root .message-bubble{padding:10px 14px;border-radius:18px;max-width:80%;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.ai-summarizer-root .message-bubble.user{background:#007bff;color:#fff;align-self:flex-end}
+.ai-summarizer-root .message-bubble.model{background:#e9e9eb;color:#1c1c1e;align-self:flex-start}
+.ai-summarizer-root .message-bubble.loading{align-self:flex-start;font-style:italic;color:#555}
+.ai-summarizer-root .message-bubble.error{background:#ffcccc;color:#a00}
+.ai-summarizer-root .chat-input-form{display:flex;gap:10px;padding:10px 16px;border-top:1px solid #e0e0e0}
+.ai-summarizer-root #chat-input{flex-grow:1;padding:10px;border:1px solid #ccc;border-radius:20px}
+.ai-summarizer-root #chat-send-btn{background:#007bff;color:#fff;border:none;border-radius:50%;width:40px;height:40px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+`);
+  };
+
+  const showToast = (message, type = 'success') => {
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    const root = document.querySelector('.ai-summarizer-root') || document.body;
+    root.appendChild(toast);
+    setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 500); }, 3000);
+  };
+
+  const manageApiKeys = async () => {
+    const geminiKey = await GM_getValue(GEMINI_KEY_NAME, "");
+    const newGeminiKey = prompt("Enter your Google AI (Gemini) API Key:", geminiKey);
+    if (newGeminiKey !== null) {
+      await GM_setValue(GEMINI_KEY_NAME, newGeminiKey.trim());
+      showToast("API Key updated!", "success");
+    }
+  };
+
+  const copyRichText = (htmlContent, plainTextContent) => {
+    try {
+      const blobHtml = new Blob([htmlContent], { type: "text/html" });
+      const blobText = new Blob([plainTextContent], { type: "text/plain" });
+      const item = new ClipboardItem({ "text/html": blobHtml, "text/plain": blobText });
+      navigator.clipboard.write([item]).then(
+        () => showToast("Formatted summary copied!")
+      ).catch(err => {
+        console.error("Rich text copy failed, falling back:", err);
+        GM_setClipboard(plainTextContent, "text");
+        showToast("Copied as plain text.");
+      });
+    } catch (e) {
+      console.error("ClipboardItem not supported, falling back:", e);
+      GM_setClipboard(plainTextContent, "text");
+      showToast("Copied as plain text.");
+    }
+  };
+
+  // =============================================================================
+  // CORE
+  // =============================================================================
+  const buildDynamicPrompt = (selectedSections, customInstructions, imageInfo = []) => {
+    let finalPrompt = "";
+
+    if (customInstructions?.trim()) {
+      finalPrompt += `SPECIAL ONE-TIME INSTRUCTION:\n${customInstructions.trim()}\n\n---\n\n`;
+    }
+    if (imageInfo.length > 0) {
+      finalPrompt += `--- AI-GENERATED IMAGE DESCRIPTIONS ---\n${imageInfo.map(i => `- ${i.description}`).join("\n")}\n\n---\n\n`;
+    }
+
+    let formatInstructions = "";
+    selectedSections.forEach(key => {
+      if (PROMPT_SECTIONS[key]) formatInstructions += PROMPT_SECTIONS[key] + "\n";
+    });
+    return finalPrompt + BASE_PROMPT_HEADER + "\n" + formatInstructions;
+  };
+
+  async function fetchOpenPhoneData(conversationId, authToken) {
+    const apiUrl = `https://communication.openphoneapi.com/v2/activity?id=${conversationId}&last=101`;
+    const response = await gmFetch(apiUrl, { headers: { Authorization: authToken } });
+    if (response.status === 401) {
+      setCookie(AUTH_COOKIE_NAME, "", -1);
+      throw new Error("Authorization expired. Toggle a message to refresh, then retry.");
+    }
+    if (!response.ok) throw new Error(`OpenPhone fetch failed (HTTP ${response.status})`);
+    return await response.json();
+  }
+
+  // Validate model exists / accessible; fallback if not.
+  async function ensureModelId(modelId, apiKey) {
+    const url = `https://generativelanguage.googleapis.com/${API_VERSION}/models/${encodeURIComponent(modelId)}`;
+    const res = await gmFetch(url + `?key=${apiKey}`);
+    if (res.ok) return modelId;
+
+    // Fallback to default stable flash if preview/locked
+    showToast(`Model "${modelId}" unavailable; falling back to ${DEFAULT_MODEL_ID}.`, 'error');
+    return DEFAULT_MODEL_ID;
+  }
+
+  async function analyzeImages(conversationActivities, modelId, geminiKey) {
+    const imageItems = (conversationActivities || [])
+      .flatMap(a => a.media || [])
+      .filter(m => m?.type?.startsWith("image/"));
+    if (imageItems.length === 0) return { imageInfo: [], imagePayloads: [] };
+
+    showToast(`Found ${imageItems.length} image(s). Analyzing…`);
+
+    const toDataUrl = async (url) => {
+      try {
+        const res = await gmFetch(url, { responseType: 'blob' });
+        if (!res.ok) throw new Error(`Fetch failed for ${url}`);
+        const blob = await res.blob();
+        return await new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve({ mime: blob.type, dataUrl: reader.result });
+          reader.readAsDataURL(blob);
+        });
+      } catch (e) {
+        console.error("Skipping image due to fetch error:", e);
+        return null;
+      }
+    };
+
+    const imagePayloads = (await Promise.all(imageItems.map(item => toDataUrl(item.url)))).filter(Boolean);
+    if (imagePayloads.length === 0) return { imageInfo: [], imagePayloads: [] };
+
+    const parts = [
+      { text: IMAGE_ANALYSIS_PROMPT },
+      ...imagePayloads.map(p => ({ inlineData: { mimeType: p.mime, data: p.dataUrl.split(",")[1] } })),
+    ];
+    const payload = { contents: [{ role: "user", parts }] };
+    const apiUrl = `https://generativelanguage.googleapis.com/${API_VERSION}/models/${encodeURIComponent(modelId)}:generateContent?key=${geminiKey}`;
+    const response = await gmFetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    let imageInfo = [];
+    if (response.ok) {
+      const json = await response.json();
+      const textResponse = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      try {
+        const metadata = JSON.parse(textResponse.replace(/```json|```/g, ''));
+        imageInfo = metadata.image_details || [];
+        showToast("Image analysis complete.");
+      } catch (e) {
+        console.error("Failed to parse image analysis JSON:", e);
+        showToast("Image analysis parsing failed.", "error");
+      }
+    } else {
+      console.warn("Image analysis API call failed:", await response.text());
+      showToast("Image analysis failed; continuing without descriptions.", "error");
+    }
+    return { imageInfo, imagePayloads };
+  }
+
+  async function callAiModel({ modelId, prompt, jsonData, imagePayloads = [], chatHistory = [] }) {
+    const apiKey = await GM_getValue(GEMINI_KEY_NAME);
+    if (!apiKey) throw new Error("Gemini API Key is not set.");
+
+    const validatedModel = await ensureModelId(modelId, apiKey);
+    const url = `https://generativelanguage.googleapis.com/${API_VERSION}/models/${encodeURIComponent(validatedModel)}:generateContent?key=${apiKey}`;
+
+    let contents;
+    if (chatHistory.length > 0) {
+      contents = chatHistory;
+    } else {
+      // Trim huge JSON to avoid accidental overages; keep ~200KB.
+      let jsonStr = JSON.stringify(jsonData || {}, null, 2);
+      if (jsonStr.length > 200_000) jsonStr = jsonStr.slice(0, 200_000) + "\n/* ...truncated... */";
+
+      const textPart = { text: `${prompt}\n\n--- JSON DATA TO ANALYZE ---\n${jsonStr}` };
+      const imageParts = (imagePayloads || []).map(p => ({
+        inlineData: { mimeType: p.mime, data: p.dataUrl.split(",")[1] }
+      }));
+      contents = [{ role: "user", parts: [textPart, ...imageParts] }];
+    }
+
+    const response = await gmFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents })
+    });
+
+    if (!response.ok) throw new Error(`Gemini API Error: ${await response.text()}`);
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text;
+  }
+
+  const runSummaryProcess = async (modelId, selectedSections, customInstructions) => {
+    showToast("Starting summary process…");
+    try {
+      const authToken = await getAuthToken();
+
+      const conversationId = window.location.href.split("/").find(p => p.startsWith("CN"));
+      if (!conversationId) throw new Error("Could not find a valid Conversation ID in the URL.");
+
+      showToast("Fetching conversation data…");
+      const openPhoneData = await fetchOpenPhoneData(conversationId, authToken);
+      if (!openPhoneData?.result?.length) return showToast("No activities found in this conversation.", "error");
+
+      const geminiKey = await GM_getValue(GEMINI_KEY_NAME);
+      const useModel = modelId || DEFAULT_MODEL_ID;
+
+      const { imageInfo, imagePayloads } = await analyzeImages(openPhoneData.result, useModel, geminiKey);
+
+      showToast("Generating summary…");
+      const dynamicPrompt = buildDynamicPrompt(selectedSections, customInstructions, imageInfo);
+      const responseText = await callAiModel({
+        modelId: useModel,
+        prompt: dynamicPrompt,
+        jsonData: openPhoneData,
+        imagePayloads
+      });
+      if (!responseText) throw new Error("The AI returned an empty response.");
+
+      const initialHistory = [
+        { role: "user", parts: [{ text: `Initial Prompt: ${dynamicPrompt}` }] },
+        { role: "model", parts: [{ text: responseText }] },
+      ];
+      showChatModal(initialHistory, useModel);
+    } catch (error) {
+      console.error("❌ Summary Process Failed:", error);
+      showToast(error.message, "error");
+    }
+  };
+
+  // =============================================================================
+  // MODALS
+  // =============================================================================
+  const showExecutionOptionsModal = () => {
+    const modal = document.createElement("div");
+    modal.className = "modal-overlay options-modal";
+
+    const defaultSections = ["title", "quick_summary", "quick_next_steps"];
+    const sectionsHtml = Object.keys(PROMPT_SECTIONS).map(key =>
+      `<label><input type="checkbox" name="section" value="${key}" ${defaultSections.includes(key) ? "checked" : ""}>${key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}</label>`
+    ).join("");
+
+    const modelsHtml = MODELS.map(m =>
+      `<div>
+         <label><input type="radio" name="model" value="${m.id}" ${m.id === DEFAULT_MODEL_ID ? "checked" : ""}> ${m.displayName}</label>
+         <div class="model-desc">${m.description}</div>
+       </div>`
+    ).join("");
+
+    modal.innerHTML = `
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Generate Summary Options</h2>
+          <button class="modal-close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="settings-section">
+            <h3>Custom Instructions (One-time)</h3>
+            <textarea id="custom-instructions" rows="3" placeholder="e.g., Act as a project manager. Focus on billing issues. "></textarea>
+          </div>
+          <div class="settings-section">
+            <h3>AI Model</h3>
+            <div class="model-selection-grid">${modelsHtml}</div>
+          </div>
+          <div class="settings-section">
+            <h3>Output Sections</h3>
+            <div class="sections-grid">${sectionsHtml}</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="modal-button" id="cancel-run">Cancel</button>
+          <button class="modal-button primary" id="generate-summary">Generate Summary</button>
+        </div>
+      </div>`;
+
+    document.querySelector('.ai-summarizer-root').appendChild(modal);
+
+    const close = () => modal.remove();
+    modal.querySelector(".modal-close").addEventListener("click", close);
+    modal.querySelector("#cancel-run").addEventListener("click", close);
+    modal.querySelector("#generate-summary").addEventListener("click", () => {
+      const selectedModel = modal.querySelector('input[name="model"]:checked').value;
+      const selectedSections = Array.from(modal.querySelectorAll('input[name="section"]:checked')).map(cb => cb.value);
+      const customInstructions = modal.querySelector("#custom-instructions").value;
+      if (selectedSections.length === 0) return showToast("Please select at least one output section.", "error");
+      close();
+      runSummaryProcess(selectedModel, selectedSections, customInstructions);
+    });
+  };
+
+  const showChatModal = (initialHistory, modelId) => {
+    let chatHistory = [...initialHistory];
+
+    const modal = document.createElement("div");
+    modal.className = "modal-overlay chat-modal";
+    modal.innerHTML = `
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>AI Summary & Refinement</h2>
+          <button class="modal-close">×</button>
+        </div>
+        <div class="modal-body"><div class="chat-log"></div></div>
+        <form class="chat-input-form">
+          <input type="text" id="chat-input" placeholder="Refine the summary..." autocomplete="off">
+          <button type="submit" id="chat-send-btn" title="Send">${ICONS.send}</button>
+        </form>
+        <div class="modal-footer">
+          <button class="modal-button primary copy-btn">Copy Summary</button>
+        </div>
+      </div>`;
+    document.querySelector('.ai-summarizer-root').appendChild(modal);
+
+    const chatLog = modal.querySelector(".chat-log");
+    const chatInput = modal.querySelector("#chat-input");
+    const chatForm = modal.querySelector(".chat-input-form");
+
+    const appendMessage = (sender, text) => {
+      const bubble = document.createElement("div");
+      bubble.className = `message-bubble ${sender}`;
+      bubble.innerHTML = sender === "model" ? markdownToHtml(text) : (text || "");
+      chatLog.appendChild(bubble);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      return bubble;
+    };
+
+    const initialSummary = chatHistory.find(h => h.role === "model")?.parts?.[0]?.text;
+    if (initialSummary) appendMessage("model", initialSummary);
+
+    const sendChatMessage = async (message) => {
+      appendMessage("user", message);
+      chatInput.value = "";
+      const loadingBubble = appendMessage("model loading", "…");
+      chatHistory.push({ role: "user", parts: [{ text: message }] });
+
+      try {
+        const responseText = await callAiModel({ modelId, chatHistory });
+        if (!responseText) throw new Error("Received an empty response from the AI.");
+        chatHistory.push({ role: "model", parts: [{ text: responseText }] });
+        loadingBubble.remove();
+        appendMessage("model", responseText);
+      } catch (error) {
+        loadingBubble.remove();
+        appendMessage("error", `Error: ${error.message}`);
+        console.error("Chat refinement error:", error);
+      }
+    };
+
+    chatForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const msg = chatInput.value.trim();
+      if (msg) sendChatMessage(msg);
+    });
+
+    const close = () => modal.remove();
+    modal.querySelector(".modal-close").addEventListener("click", close);
+    modal.querySelector(".copy-btn").addEventListener("click", () => {
+      const lastModelMessage = chatLog.querySelector(".message-bubble.model:last-child");
+      if (lastModelMessage) copyRichText(lastModelMessage.innerHTML, lastModelMessage.textContent);
+    });
+  };
+
+  // =============================================================================
+  // HOVER BUTTON INJECTION
+  // =============================================================================
+  const addSummarizerButtonToMenu = (menu) => {
+    const button = document.createElement('button');
+    button.id = 'ai-summary-menu-btn';
+    button.className = 'xtabak0 xtabak6 xtabaka xtabakd xtabakf xtabakh';
+    button.style.cssText = 'background-color: transparent; width: 30px; height: 30px; font-size: 20px; border: none;';
+    button.innerHTML = ICONS.sparkle;
+    button.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showExecutionOptionsModal();
+    });
+
+    const tooltipDiv = document.createElement('div');
+    tooltipDiv.className = '_3heux70';
+    tooltipDiv.innerHTML = `<span>AI Summary</span>`;
+    menu.appendChild(button);
+    menu.appendChild(tooltipDiv);
+  };
+
+  // =============================================================================
+  // INIT
+  // =============================================================================
+  function initialize() {
+    const rootEl = document.createElement('div');
+    rootEl.className = 'ai-summarizer-root';
+    document.body.appendChild(rootEl);
+
+    injectStyles();
+
+    const settingsButton = document.createElement('button');
+    settingsButton.innerHTML = ICONS.settings;
+    settingsButton.title = "API Key Settings";
+    settingsButton.addEventListener('click', manageApiKeys);
+    settingsButton.style.cssText = 'position:fixed; bottom:30px; right:30px; z-index:99999; background:#6c757d; color:white; border:0; border-radius:50%; width:40px; height:40px; cursor:pointer; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 8px rgba(0,0,0,0.3);';
+    rootEl.appendChild(settingsButton);
+
+    setInterval(() => {
+      const menus = document.querySelectorAll('#message-quick-actions:not([data-summarizer-button-injected])');
+      menus.forEach(menu => {
+        menu.setAttribute('data-summarizer-button-injected', 'true');
+        addSummarizerButtonToMenu(menu);
+      });
+    }, 500);
+  }
+
+  initialize();
 })();
