@@ -1,0 +1,468 @@
+// ==UserScript==
+// @name         Job Application Autofill Assistant (ATS) — Shadow UI
+// @namespace    http://tampermonkey.net/
+// @version      1.2.0
+// @description  Scan ATS forms, build a JSON plan with an LLM, preview, and autofill without submitting. Shadow DOM UI to avoid site CSS conflicts.
+// @author       You
+// @match        *://*/*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      api.openai.com
+// @connect      generativelanguage.googleapis.com
+// @run-at       document-idle
+// ==/UserScript==
+
+;(function(){
+  'use strict'
+
+  // ----------------------------
+  // CONFIG
+  // ----------------------------
+  const cfg = {
+    modelProvider: GM_getValue('modelProvider','gemini'),
+    modelName: GM_getValue('modelName','gemini-1.5-flash'),
+    geminiKey: GM_getValue('geminiKey',''),
+    openaiKey: GM_getValue('openaiKey',''),
+    mode: GM_getValue('mode','planOnly'),
+    preferences: GM_getValue('preferences',{
+      relocation:'No',
+      travel:'Yes',
+      workAuth:'US Citizen',
+      startDate:'2 weeks',
+      desiredSalaryStrategy:'negotiable',
+      targetSalaryRange:{min:0,max:0},
+      diversityAnswers:'Prefer not to say',
+      subjectivesPolicy:'draftThenAsk',
+      phoneFormat:'digits',
+      country:'United States',
+      uploadPaths:{resume:'',coverLetter:''}
+    }),
+    profile: GM_getValue('profile',{
+      name:{first:'',last:'',full:''},
+      email:'',
+      phone:'',
+      location:{city:'',state:'',country:'United States'},
+      links:{linkedin:'',portfolio:'',github:''},
+      education:[],
+      work:[],
+      skills:[],
+      certifications:[],
+      resumeText:'',
+      coverLetterBase:''
+    })
+  }
+
+  const STATE = { plan:null }
+
+  // ----------------------------
+  // SHADOW DOM UI
+  // ----------------------------
+  function ensureUI(){
+    const id = 'ats-af-root'
+    let host = document.getElementById(id)
+    if(!host){
+      host = document.createElement('div')
+      host.id = id
+      host.style.position = 'fixed'
+      host.style.zIndex = 2147483647
+      host.style.right = '16px'
+      host.style.bottom = '16px'
+      document.documentElement.appendChild(host)
+    }
+    if(!host.shadowRoot) host.attachShadow({mode:'open'})
+    const root = host.shadowRoot
+
+    if(!root.getElementById('wrap')){
+      const wrap = document.createElement('div')
+      wrap.id = 'wrap'
+      wrap.innerHTML = `
+        <style>
+          :host{ all:initial }
+          *{ box-sizing:border-box; font-family: ui-sans-serif, system-ui, Segoe UI, Roboto, Helvetica, Arial }
+          .card{ background:#111; color:#fff; width:380px; border-radius:12px; box-shadow:0 8px 22px rgba(0,0,0,.45); overflow:hidden; border:1px solid #222 }
+          .hdr{ display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid #222 }
+          .dot{ width:10px; height:10px; border-radius:50%; background:#26a269 }
+          .title{ font-weight:700; font-size:14px }
+          .badge{ margin-left:auto; background:#222; color:#ddd; padding:2px 8px; border-radius:999px; font-size:11px }
+          .body{ padding:10px; max-height:60vh; overflow:auto }
+          .row{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px }
+          .btn{ background:#1f6feb; color:#fff; border:0; padding:8px 10px; border-radius:8px; cursor:pointer; font-size:12px }
+          .btn.sec{ background:#333 }
+          .kv{ display:grid; grid-template-columns:120px 1fr; gap:6px; margin:6px 0; font-size:12px; color:#bbb }
+          .inp, select{ width:100%; padding:6px 8px; border-radius:6px; border:1px solid #333; background:#0f0f0f; color:#ddd; font-size:12px }
+          .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; background:#0a0a0a; color:#e5e7eb; padding:8px; border-radius:8px; white-space:pre-wrap; word-break:break-word }
+        </style>
+        <div class="card">
+          <div class="hdr">
+            <div class="dot"></div>
+            <div class="title">ATS Autofill</div>
+            <div id="badge" class="badge">detecting…</div>
+          </div>
+          <div class="body">
+            <div class="row">
+              <button id="scan" class="btn">Scan</button>
+              <button id="plan" class="btn sec">Plan</button>
+              <button id="fill" class="btn sec">Autofill</button>
+              <button id="tailor" class="btn sec">Tailor</button>
+            </div>
+            <div class="row">
+              <button id="settings" class="btn sec">Settings</button>
+              <button id="copy" class="btn sec">Copy Plan</button>
+            </div>
+            <div class="kv">
+              <div>Mode</div>
+              <div>
+                <select id="mode" class="inp">
+                  <option value="planOnly">planOnly</option>
+                  <option value="autofillOnly">autofillOnly</option>
+                  <option value="autofillAndTailor">autofillAndTailor</option>
+                </select>
+              </div>
+              <div>Model</div>
+              <div>
+                <select id="model" class="inp">
+                  <option value="gemini|gemini-1.5-flash">Gemini 1.5 Flash</option>
+                  <option value="gemini|gemini-1.5-pro">Gemini 1.5 Pro</option>
+                  <option value="openai|gpt-4o-mini">OpenAI GPT-4o mini</option>
+                  <option value="openai|gpt-4.1-mini">OpenAI GPT-4.1 mini</option>
+                </select>
+              </div>
+            </div>
+            <div id="log" class="mono">Ready</div>
+            <div id="json" class="mono" style="margin-top:8px; display:none"></div>
+          </div>
+        </div>
+      `
+      root.appendChild(wrap)
+
+      root.getElementById('mode').value = cfg.mode
+      root.getElementById('model').value = `${cfg.modelProvider}|${cfg.modelName}`
+
+      root.getElementById('scan').addEventListener('click', scanPage)
+      root.getElementById('plan').addEventListener('click', buildPlan)
+      root.getElementById('fill').addEventListener('click', autofill)
+      root.getElementById('tailor').addEventListener('click', tailorOnly)
+      root.getElementById('settings').addEventListener('click', openSettings)
+      root.getElementById('copy').addEventListener('click', copyPlan)
+      root.getElementById('mode').addEventListener('change', e=>{ cfg.mode=e.target.value; GM_setValue('mode',cfg.mode) })
+
+      document.addEventListener('keydown', e=>{
+        if(e.altKey&&e.key.toLowerCase()==='p') buildPlan()
+        if(e.altKey&&e.key.toLowerCase()==='f') autofill()
+      })
+    }
+    return root
+  }
+
+  function setBadge(t){ const root=ensureUI(); const el=root.getElementById('badge'); if(el) el.textContent=t }
+  function log(t){ const root=ensureUI(); const el=root.getElementById('log'); if(el) el.textContent = `[${new Date().toLocaleTimeString()}] ${t}` }
+  function showJSON(o){ const root=ensureUI(); const el=root.getElementById('json'); el.style.display='block'; el.textContent = JSON.stringify(o,null,2) }
+  function copyPlan(){ const root=ensureUI(); const el=root.getElementById('json'); const txt=el.textContent; if(!txt){ log('Nothing to copy'); return } navigator.clipboard.writeText(txt).then(()=>log('Copied')) }
+
+  // ----------------------------
+  // HELPERS
+  // ----------------------------
+  const norm = s => (s||'').replace(/\s+/g,' ').trim()
+
+  const getPlatform = () => {
+    const host = location.hostname
+    const path = location.pathname
+    const html = document.body ? document.body.innerHTML.slice(0,20000) : ''
+    let platform='custom', confidence=0.4
+    const looks = n => html.includes(n)
+    if(/myworkdayjobs|workday|wd\d/.test(host)||looks('wd-')){ platform='workday'; confidence=0.86 }
+    else if(/greenhouse\.io|boards\.greenhouse\.io/.test(host)){ platform='greenhouse'; confidence=0.82 }
+    else if(/jobs\.lever\.co|lever\.co/.test(host)){ platform='lever'; confidence=0.83 }
+    else if(/taleo\.net|oraclecloud\.com/.test(host)||looks('oraclerecruiting')){ platform='taleo'; confidence=0.7 }
+    else if(/successfactors\.com/.test(host)){ platform='successfactors'; confidence=0.72 }
+    else if(/icims\.com/.test(host)){ platform='icims'; confidence=0.7 }
+    else if(/smartrecruiters\.com/.test(host)){ platform='smartrecruiters'; confidence=0.7 }
+    else if(/jobvite\.com/.test(host)||/jazzhr\.com/.test(host)){ platform='jobvite'; confidence=0.68 }
+    else if(/bullhorn\.com/.test(host)){ platform='bullhorn'; confidence=0.6 }
+    else if(/dayforcehcm|dayforce/.test(host)){ platform='dayforce'; confidence=0.6 }
+    else if(/workable\.com/.test(host)){ platform='workable'; confidence=0.7 }
+    else if(/bamboohr\.com/.test(host)){ platform='bamboohr'; confidence=0.6 }
+    else if(/indeed\.com/.test(host)){ platform='indeed-quick-apply'; confidence=0.7 }
+    else if(/ziprecruiter\.com/.test(host)){ platform='ziprecruiter-quick-apply'; confidence=0.6 }
+    return { platform, confidence, host, path }
+  }
+
+  const captureControls = () => {
+    const controls=[]
+    const labelMap = new Map()
+    document.querySelectorAll('label[for]').forEach(l=>{ const id=l.getAttribute('for'); if(id) labelMap.set(id, norm(l.textContent)) })
+
+    const nearestText = el => {
+      const ariaLabelledby = el.getAttribute('aria-labelledby')
+      if(ariaLabelledby){
+        const t = ariaLabelledby.split(/\s+/).map(id=>document.getElementById(id)?.textContent||'').join(' ')
+        if(norm(t)) return norm(t)
+      }
+      const labelAnc = el.closest('label')
+      if(labelAnc){ const t=norm(labelAnc.textContent.replace(/\*/g,'')); if(t) return t }
+      let p = el.parentElement
+      for(let d=0;p&&d<3;d++,p=p.parentElement){
+        const cand = p.querySelector('label:not([for]), .label, .field-label, .FormLabel, .input-label, [role="label"]')
+        if(cand && norm(cand.textContent)) return norm(cand.textContent)
+        const prev = p.previousElementSibling
+        if(prev && /label|legend|span|div/i.test(prev.tagName) && norm(prev.textContent)) return norm(prev.textContent)
+      }
+      const aria = el.getAttribute('aria-label'); if(norm(aria)) return norm(aria)
+      const ph = el.getAttribute('placeholder'); if(norm(ph)) return norm(ph)
+      return ''
+    }
+
+    const push = el => {
+      const tag = el.tagName.toLowerCase()
+      const type = (el.getAttribute('type')||'').toLowerCase()
+      const id = el.id||''
+      const name = el.getAttribute('name')||''
+      const cls = el.className||''
+      const ariaLabel = el.getAttribute('aria-label')||''
+      const ariaLabelledby = el.getAttribute('aria-labelledby')||''
+      const placeholder = el.getAttribute('placeholder')||''
+      const required = el.required || /required/.test(el.outerHTML)
+      const maxlength = el.getAttribute('maxlength')||''
+      const pattern = el.getAttribute('pattern')||''
+      const min = el.getAttribute('min')||''
+      const max = el.getAttribute('max')||''
+      const dataAttrs={}
+      for(const a of el.attributes) if(a.name.startsWith('data-')) dataAttrs[a.name]=a.value
+      let labelText=''
+      if(id && labelMap.has(id)) labelText = labelMap.get(id)
+      if(!labelText) labelText = nearestText(el)
+      const rec = { tag, type, id, name, class:cls, ariaLabel, ariaLabelledby, placeholder, labelText, required, maxlength, pattern, min, max, dataAttrs, enclosingText: norm(el.closest('fieldset, .field, .form-group, .css-1, .css-2, .gh-field, .lever-form')?.textContent||'') }
+      if(tag==='select') rec.options = Array.from(el.options).map(o=>({value:o.value, text:norm(o.textContent)}))
+      controls.push(rec)
+    }
+
+    document.querySelectorAll('form').forEach(f=>f.querySelectorAll('input, select, textarea').forEach(push))
+    document.querySelectorAll('input, select, textarea').forEach(el=>{ if(!el.closest('form')) push(el) })
+    return controls
+  }
+
+  const extractJobDescription = () => {
+    const sel = [
+      '[data-qa="job-description"]',
+      '[data-test="job-description"]',
+      '.job-description',
+      '#jobDescriptionText',
+      '.content .description',
+      '.section.page-full .description',
+      'article'
+    ].join(',')
+    const el = document.querySelector(sel)
+    if(el) return norm(el.innerText)
+    const meta = document.querySelector('meta[name="description"]')?.content
+    if(meta) return norm(meta)
+    const big = Array.from(document.querySelectorAll('div, section, article')).sort((a,b)=>b.innerText.length-a.innerText.length)[0]
+    return norm(big?.innerText||'')
+  }
+
+  // ----------------------------
+  // LLM
+  // ----------------------------
+  const USERSCRIPT_LLM_PROMPT = `Return a single JSON object named plan with this schema: { platform, confidence, actions[], subjectivePrompts[], tailoredContent{resumeBullets[], coverLetter}, uploads[], warnings[], submitSuggested:false }. Identify platform from hostname/DOM. Build labels via label[for], nested label, aria-label, aria-labelledby, placeholder, nearby text. Map identity fields from profile. Respect maxlength/pattern/min/max/required. For selects match option text. EEO defaults to "Prefer not to say" unless preferences override. Subjectives follow preferences.subjectivesPolicy. For mode=autofillAndTailor, extract JD keywords and produce up to 5 concise bullets and a 250-350 word cover letter. Output JSON only.`
+
+  async function callGemini(model, systemPrompt, inputObj){
+    const key = cfg.geminiKey
+    if(!key) throw new Error('Gemini API key missing. Open Settings.')
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`
+    const contents = [ { role:'user', parts:[{text:systemPrompt}] }, { role:'user', parts:[{text:JSON.stringify(inputObj)}] } ]
+    const res = await fetch(url,{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ contents, generationConfig:{ temperature:0.2, maxOutputTokens:4096 } }) })
+    if(!res.ok) throw new Error(`Gemini HTTP ${res.status}`)
+    const data = await res.json()
+    return data.candidates?.[0]?.content?.parts?.map(p=>p.text).join('\n')||''
+  }
+
+  async function callOpenAI(model, systemPrompt, inputObj){
+    const key = cfg.openaiKey
+    if(!key) throw new Error('OpenAI API key missing. Open Settings.')
+    const url = 'https://api.openai.com/v1/chat/completions'
+    const res = await fetch(url,{ method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${key}` }, body: JSON.stringify({ model, messages:[ {role:'system', content:systemPrompt}, {role:'user', content:JSON.stringify(inputObj)} ], temperature:0.2, response_format:{type:'json_object'} }) })
+    if(!res.ok) throw new Error(`OpenAI HTTP ${res.status}`)
+    const data = await res.json()
+    return data.choices?.[0]?.message?.content||''
+  }
+
+  async function getPlanFromLLM(inputs){
+    const root = ensureUI()
+    const [provider,name] = root.getElementById('model').value.split('|')
+    cfg.modelProvider = provider
+    cfg.modelName = name
+    GM_setValue('modelProvider',provider)
+    GM_setValue('modelName',name)
+    log(`Calling ${provider} ${name}`)
+    let raw
+    if(provider==='gemini') raw = await callGemini(name, USERSCRIPT_LLM_PROMPT, inputs)
+    else raw = await callOpenAI(name, USERSCRIPT_LLM_PROMPT, inputs)
+    raw = raw.trim().replace(/^```json\s*/i,'').replace(/```$/i,'').trim()
+    let plan
+    try{ plan = JSON.parse(raw) }catch(e){ console.error('Plan parse error', raw); throw new Error('Plan JSON parse failed') }
+    return plan
+  }
+
+  // ----------------------------
+  // APPLY PLAN
+  // ----------------------------
+  const q = s => document.querySelector(s)
+
+  function resolve(v){ if(v==null) return ''; if(typeof v==='string') return v; if(typeof v==='object'&&v.placeholder) return v.placeholder; return String(v) }
+
+  function applyText(sel,val){ const el=q(sel); if(!el) throw new Error(`Selector not found: ${sel}`); el.focus(); el.value=resolve(val); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})) }
+  function applySelect(sel,val){ const el=q(sel); if(!el) throw new Error(`Selector not found: ${sel}`); const v=resolve(val); const opts=Array.from(el.options); const exact=opts.find(o=>norm(o.textContent).toLowerCase()===norm(v).toLowerCase()||o.value===v); const partial=opts.find(o=>norm(o.textContent).toLowerCase().includes(norm(v).toLowerCase())); el.value=(exact||partial||opts[0])?.value; el.dispatchEvent(new Event('change',{bubbles:true})) }
+  function applyCheck(sel,checked){ const el=q(sel); if(!el) throw new Error(`Selector not found: ${sel}`); el.checked=!!checked; el.dispatchEvent(new Event('change',{bubbles:true})) }
+  function applyClick(sel){ const el=q(sel); if(!el) throw new Error(`Selector not found: ${sel}`); el.click() }
+  async function applyUpload(sel,pathKey){ const el=q(sel); if(!el) throw new Error(`Selector not found: ${sel}`); alert(`Please upload the ${pathKey} file in the picker.`); try{ el.click() }catch{} }
+
+  async function applyPlan(plan){
+    if(!plan || !Array.isArray(plan.actions)) throw new Error('Invalid plan')
+    for(const a of plan.actions){
+      try{
+        if(a.action==='fillText') applyText(a.selector,a.value)
+        else if(a.action==='fillSelect') applySelect(a.selector,a.value)
+        else if(a.action==='check') applyCheck(a.selector,!!a.value)
+        else if(a.action==='click') applyClick(a.selector)
+        else if(a.action==='upload') await applyUpload(a.selector, a.value?.pathKey||'resume')
+        else if(a.action==='wait') await new Promise(r=>setTimeout(r, Number(a.value)||400))
+        else if(a.action==='warn') console.warn('PLAN WARN', a.reason||a.value)
+        else if(a.action==='askUser') console.warn('PLAN ASK', a.reason||a.question)
+      }catch(e){ console.warn('Action failed', a, e) }
+    }
+  }
+
+  // ----------------------------
+  // SETTINGS
+  // ----------------------------
+  function openSettings(){
+    const root = ensureUI()
+    const modal = document.createElement('div')
+    modal.innerHTML = `
+      <style>
+        .back{position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:2}
+        .panel{ background:#111; color:#fff; width:560px; border-radius:12px; padding:12px; border:1px solid #222 }
+        .hdr{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px }
+        .grid{ display:grid; grid-template-columns:180px 1fr; gap:8px; font-size:12px }
+        .inp{ width:100%; padding:6px 8px; border-radius:6px; border:1px solid #333; background:#0f0f0f; color:#ddd }
+        .row{ display:flex; gap:8px; justify-content:flex-end; margin-top:10px }
+        .btn{ background:#1f6feb; color:#fff; border:0; padding:8px 10px; border-radius:8px; cursor:pointer; font-size:12px }
+        .btn.sec{ background:#333 }
+      </style>
+      <div class="back">
+        <div class="panel">
+          <div class="hdr"><div><strong>Settings</strong></div><button id="x" class="btn sec">Close</button></div>
+          <div class="grid">
+            <div>Gemini Key</div><input id="k-g" class="inp" value="${cfg.geminiKey}">
+            <div>OpenAI Key</div><input id="k-o" class="inp" value="${cfg.openaiKey}">
+            <div>Relocation</div><input id="p-reloc" class="inp" value="${cfg.preferences.relocation}">
+            <div>Travel</div><input id="p-travel" class="inp" value="${cfg.preferences.travel}">
+            <div>Work Auth</div><input id="p-auth" class="inp" value="${cfg.preferences.workAuth}">
+            <div>Start Date</div><input id="p-start" class="inp" value="${cfg.preferences.startDate}">
+            <div>Subjectives</div>
+            <select id="p-subj" class="inp">
+              <option ${cfg.preferences.subjectivesPolicy==='skipOptional'?'selected':''} value="skipOptional">skipOptional</option>
+              <option ${cfg.preferences.subjectivesPolicy==='draftThenAsk'?'selected':''} value="draftThenAsk">draftThenAsk</option>
+              <option ${cfg.preferences.subjectivesPolicy==='alwaysAsk'?'selected':''} value="alwaysAsk">alwaysAsk</option>
+            </select>
+            <div>Salary Strategy</div>
+            <select id="p-sal" class="inp">
+              <option ${cfg.preferences.desiredSalaryStrategy==='negotiable'?'selected':''} value="negotiable">negotiable</option>
+              <option ${cfg.preferences.desiredSalaryStrategy==='targetRange'?'selected':''} value="targetRange">targetRange</option>
+              <option ${cfg.preferences.desiredSalaryStrategy==='leaveBlank'?'selected':''} value="leaveBlank">leaveBlank</option>
+            </select>
+            <div>Salary Min</div><input id="p-smin" type="number" class="inp" value="${cfg.preferences.targetSalaryRange.min}">
+            <div>Salary Max</div><input id="p-smax" type="number" class="inp" value="${cfg.preferences.targetSalaryRange.max}">
+            <div>Country</div><input id="p-country" class="inp" value="${cfg.preferences.country}">
+            <div>Email</div><input id="p-email" class="inp" value="${cfg.profile.email}">
+            <div>Phone</div><input id="p-phone" class="inp" value="${cfg.profile.phone}">
+            <div>First Name</div><input id="p-first" class="inp" value="${cfg.profile.name.first}">
+            <div>Last Name</div><input id="p-last" class="inp" value="${cfg.profile.name.last}">
+            <div>LinkedIn</div><input id="p-li" class="inp" value="${cfg.profile.links.linkedin}">
+          </div>
+          <div class="row"><button id="save" class="btn">Save</button></div>
+        </div>
+      </div>
+    `
+    root.appendChild(modal)
+    const $ = sel => modal.querySelector(sel)
+    $('#x').onclick = ()=> modal.remove()
+    $('#save').onclick = ()=>{
+      cfg.geminiKey = $('#k-g').value
+      cfg.openaiKey = $('#k-o').value
+      cfg.preferences.relocation = $('#p-reloc').value
+      cfg.preferences.travel = $('#p-travel').value
+      cfg.preferences.workAuth = $('#p-auth').value
+      cfg.preferences.startDate = $('#p-start').value
+      cfg.preferences.subjectivesPolicy = $('#p-subj').value
+      cfg.preferences.desiredSalaryStrategy = $('#p-sal').value
+      cfg.preferences.targetSalaryRange.min = Number($('#p-smin').value||0)
+      cfg.preferences.targetSalaryRange.max = Number($('#p-smax').value||0)
+      cfg.preferences.country = $('#p-country').value
+      cfg.profile.email = $('#p-email').value
+      cfg.profile.phone = $('#p-phone').value
+      cfg.profile.name.first = $('#p-first').value
+      cfg.profile.name.last = $('#p-last').value
+      cfg.profile.name.full = `${cfg.profile.name.first} ${cfg.profile.name.last}`.trim()
+      cfg.profile.links.linkedin = $('#p-li').value
+      GM_setValue('geminiKey', cfg.geminiKey)
+      GM_setValue('openaiKey', cfg.openaiKey)
+      GM_setValue('preferences', cfg.preferences)
+      GM_setValue('profile', cfg.profile)
+      modal.remove()
+      log('Saved settings')
+    }
+  }
+
+  // ----------------------------
+  // MAIN ACTIONS
+  // ----------------------------
+  function scanPage(){
+    const det = getPlatform()
+    setBadge(`${det.platform} ${Math.round(det.confidence*100)}%`)
+    const snapshot = {
+      siteMeta:{ hostname:det.host, path:det.path, detectedPlatform:det.platform },
+      domSnapshot: captureControls(),
+      jobDescription: extractJobDescription(),
+      profile: cfg.profile,
+      preferences: cfg.preferences,
+      mode: ensureUI().getElementById('mode').value
+    }
+    GM_setValue('lastSnapshot', snapshot)
+    showJSON(snapshot)
+    log(`Scanned ${snapshot.domSnapshot.length} controls`)
+    return snapshot
+  }
+
+  async function buildPlan(){
+    const snapshot = scanPage()
+    try{
+      const plan = await getPlanFromLLM(snapshot)
+      STATE.plan = plan
+      GM_setValue('lastPlan', plan)
+      showJSON(plan)
+      log('Plan ready')
+    }catch(e){ console.error(e); log(String(e.message||e)) }
+  }
+
+  async function autofill(){
+    const plan = STATE.plan || GM_getValue('lastPlan',null)
+    if(!plan){ log('No plan yet. Click Plan first.'); return }
+    try{ log('Applying plan'); await applyPlan(plan); log('Autofill complete') }catch(e){ console.error(e); log(String(e.message||e)) }
+  }
+
+  async function tailorOnly(){
+    const snapshot = scanPage(); snapshot.mode='autofillAndTailor'
+    try{ const plan = await getPlanFromLLM(snapshot); STATE.plan=plan; GM_setValue('lastPlan',plan); showJSON(plan); log('Tailored content generated') }catch(e){ console.error(e); log(String(e.message||e)) }
+  }
+
+  // ----------------------------
+  // INIT
+  // ----------------------------
+  ensureUI()
+  const det = getPlatform()
+  setBadge(`${det.platform} ${Math.round(det.confidence*100)}%`)
+  log('Loaded')
+  new MutationObserver(()=>ensureUI()).observe(document.documentElement,{childList:true,subtree:true})
+
+})()
