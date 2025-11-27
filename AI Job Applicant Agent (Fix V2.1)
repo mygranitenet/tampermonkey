@@ -1,0 +1,291 @@
+// ==UserScript==
+// @name         AI Job Applicant Agent (Fix V2.1)
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  Robust UI version with error handling for API responses.
+// @author       AI Architecture
+// @match        *://*/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    console.log('AI Agent: Script Loaded');
+
+    const STATE = {
+        apiKey: GM_getValue('gemini_api_key', ''),
+        userProfile: GM_getValue('user_profile', '{}')
+    };
+
+    function createUI() {
+        if (document.getElementById('ai-agent-panel')) return;
+
+        // Main Container
+        const panel = document.createElement('div');
+        panel.id = 'ai-agent-panel';
+        Object.assign(panel.style, {
+            position: 'fixed',
+            bottom: '20px',
+            right: '20px',
+            width: '320px',
+            backgroundColor: '#222',
+            color: '#fff',
+            zIndex: '2147483647',
+            borderRadius: '8px',
+            boxShadow: '0 0 20px rgba(0,0,0,0.5)',
+            fontFamily: 'sans-serif',
+            fontSize: '14px',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            border: '1px solid #444'
+        });
+
+        // Header
+        const header = document.createElement('div');
+        header.textContent = '🤖 AI Job Filler';
+        Object.assign(header.style, {
+            padding: '12px',
+            background: '#333',
+            cursor: 'pointer',
+            fontWeight: 'bold',
+            borderBottom: '1px solid #444',
+            display: 'flex',
+            justifyContent: 'space-between'
+        });
+
+        // Content Area
+        const content = document.createElement('div');
+        Object.assign(content.style, {
+            padding: '15px',
+            display: 'none',
+            flexDirection: 'column',
+            gap: '10px'
+        });
+
+        // Inputs
+        const createInput = (placeholder, value, type = 'text') => {
+            const input = type === 'textarea' ? document.createElement('textarea') : document.createElement('input');
+            if (type !== 'textarea') input.type = type;
+            input.placeholder = placeholder;
+            input.value = value;
+            Object.assign(input.style, {
+                width: '100%',
+                background: '#333',
+                border: '1px solid #555',
+                color: '#fff',
+                padding: '8px',
+                borderRadius: '4px',
+                boxSizing: 'border-box',
+                minHeight: type === 'textarea' ? '100px' : 'auto'
+            });
+            return input;
+        };
+
+        const keyInput = createInput('Gemini API Key', STATE.apiKey, 'password');
+        const profileInput = createInput('Paste User JSON here...', STATE.userProfile, 'textarea');
+
+        // Buttons
+        const btnContainer = document.createElement('div');
+        btnContainer.style.display = 'flex';
+        btnContainer.style.gap = '10px';
+
+        const createBtn = (text, bg) => {
+            const btn = document.createElement('button');
+            btn.textContent = text;
+            Object.assign(btn.style, {
+                flex: '1',
+                padding: '10px',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                color: '#fff',
+                backgroundColor: bg
+            });
+            return btn;
+        };
+
+        const saveBtn = createBtn('Save', '#444');
+        const runBtn = createBtn('Auto-Fill', '#007bff');
+
+        // Status
+        const status = document.createElement('div');
+        status.textContent = 'Ready';
+        status.style.fontSize = '12px';
+        status.style.color = '#888';
+        status.style.textAlign = 'center';
+        status.style.whiteSpace = 'pre-wrap'; // Allow multiline errors
+
+        // Assembly
+        btnContainer.appendChild(saveBtn);
+        btnContainer.appendChild(runBtn);
+        
+        content.appendChild(keyInput);
+        content.appendChild(profileInput);
+        content.appendChild(btnContainer);
+        content.appendChild(status);
+
+        panel.appendChild(header);
+        panel.appendChild(content);
+
+        document.documentElement.appendChild(panel);
+
+        // Logic
+        header.addEventListener('click', () => {
+            const isHidden = content.style.display === 'none';
+            content.style.display = isHidden ? 'flex' : 'none';
+        });
+
+        saveBtn.addEventListener('click', () => {
+            GM_setValue('gemini_api_key', keyInput.value);
+            GM_setValue('user_profile', profileInput.value);
+            STATE.apiKey = keyInput.value;
+            STATE.userProfile = profileInput.value;
+            status.textContent = 'Settings Saved';
+            status.style.color = '#4f4';
+        });
+
+        runBtn.addEventListener('click', () => {
+            status.textContent = 'Processing...';
+            status.style.color = '#fa0';
+            runAgent(status);
+        });
+    }
+
+    // --- Agent Logic ---
+
+    function scanForm() {
+        const inputs = Array.from(document.querySelectorAll('input, textarea, select'));
+        return inputs
+            .filter(el => {
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none' && style.visibility !== 'hidden' && !el.disabled;
+            })
+            .map((el, i) => ({
+                id: i,
+                tag: el.tagName,
+                type: el.type,
+                name: el.name || el.id || '',
+                label: getLabel(el),
+                element: el
+            }));
+    }
+
+    function getLabel(el) {
+        if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+        if (el.placeholder) return el.placeholder;
+        
+        if (el.id) {
+            const label = document.querySelector(`label[for="${el.id}"]`);
+            if (label) return label.innerText;
+        }
+
+        const parent = el.parentElement;
+        if (parent) return parent.innerText.split('\n')[0].substring(0, 50);
+        
+        return '';
+    }
+
+    function runAgent(statusEl) {
+        const fields = scanForm();
+        
+        if (!fields.length) {
+            statusEl.textContent = 'No fields found';
+            statusEl.style.color = '#f44';
+            return;
+        }
+
+        if (!STATE.apiKey) {
+            statusEl.textContent = 'Error: Missing API Key';
+            statusEl.style.color = '#f44';
+            return;
+        }
+
+        const prompt = `
+            Task: Fill job application form.
+            User Profile: ${STATE.userProfile}
+            
+            Fields Found:
+            ${JSON.stringify(fields.map(f => ({id: f.id, label: f.label, name: f.name})))}
+
+            Return JSON object: {"field_id": "value"}.
+            Rules:
+            - Exact matches only.
+            - If field is checkbox, value is "true".
+            - No markdown.
+        `;
+
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${STATE.apiKey}`,
+            headers: { "Content-Type": "application/json" },
+            data: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+            onload: (res) => {
+                try {
+                    const json = JSON.parse(res.responseText);
+                    
+                    // --- ERROR HANDLING FIX ---
+                    if (json.error) {
+                        console.error("Gemini API Error:", json.error);
+                        statusEl.textContent = `API Error: ${json.error.message || json.error.status}`;
+                        statusEl.style.color = '#f44';
+                        return;
+                    }
+
+                    if (!json.candidates || json.candidates.length === 0) {
+                        console.error("No candidates returned. Full response:", json);
+                        statusEl.textContent = 'Error: AI returned no answer. Check safety settings or prompt.';
+                        statusEl.style.color = '#f44';
+                        return;
+                    }
+
+                    const text = json.candidates[0].content.parts[0].text;
+                    const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
+                    const data = JSON.parse(cleanText);
+                    
+                    applyValues(fields, data);
+                    statusEl.textContent = `Filled ${Object.keys(data).length} fields`;
+                    statusEl.style.color = '#4f4';
+
+                } catch (e) {
+                    console.error("Parsing Error:", e);
+                    console.log("Raw Response:", res.responseText);
+                    statusEl.textContent = 'Error parsing AI response. Check Console.';
+                    statusEl.style.color = '#f44';
+                }
+            },
+            onerror: (err) => {
+                console.error("Network Error:", err);
+                statusEl.textContent = 'Network Request Failed';
+                statusEl.style.color = '#f44';
+            }
+        });
+    }
+
+    function applyValues(fields, data) {
+        for (const [id, val] of Object.entries(data)) {
+            const field = fields.find(f => f.id == id);
+            if (!field) continue;
+            
+            const el = field.element;
+            el.focus();
+            
+            if (field.type === 'checkbox' || field.type === 'radio') {
+                if (String(val).toLowerCase() === 'true') el.click();
+            } else {
+                el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            
+            el.blur();
+        }
+    }
+
+    setTimeout(createUI, 1000);
+
+})();
